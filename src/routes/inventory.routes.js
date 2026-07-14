@@ -1,10 +1,14 @@
 const { Router } = require('express');
 const auth = require('../middlewares/auth.middleware');
 const Inventory = require('../models/Inventory');
+const { upsertRawInventory } = require('../controllers/inventory.controller');
 
 const router = Router();
 
-// GET /api/inventory/:productId  (see RAW + PRINTED for a product)
+// upsert raw inventory for a product (admin)
+router.post('/raw', auth(['ADMIN']), upsertRawInventory);
+
+// existing GET /:productId
 router.get('/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), async (req, res) => {
   try {
     const { productId } = req.params;
