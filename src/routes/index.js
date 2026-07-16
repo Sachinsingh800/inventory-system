@@ -7,6 +7,7 @@ const purchaseRoutes = require('./purchase.routes');
 const printingRoutes = require('./printing.routes');
 const barcodeRoutes = require('./barcode.routes');
 const packingRoutes = require('./packing.routes');
+const dashboardRoutes = require('./dashboard.routes');
 
 const router = Router();
 
@@ -18,6 +19,7 @@ router.use('/purchase-orders', purchaseRoutes);
 router.use('/printing-jobs', printingRoutes);
 router.use('/barcodes', barcodeRoutes);
 router.use('/packing-sessions', packingRoutes);
+router.use('/dashboard', dashboardRoutes);
 
 router.get('/health', (req, res) => {
   res.json({ status: 'ok' });
