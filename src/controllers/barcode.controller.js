@@ -1,7 +1,8 @@
+// controllers/barcode.controller.js
 const Barcode = require('../models/Barcode');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
-const { v4: uuidv4 } = require('uuid'); // install: npm install uuid
+const { v4: uuidv4 } = require('uuid'); // npm install uuid
 
 // POST /api/barcodes  (ADMIN / PRINTER)
 // body: { productId, designCode, quantity }
@@ -60,4 +61,73 @@ const generateBarcodes = async (req, res) => {
   }
 };
 
-module.exports = { generateBarcodes };
+// GET /api/barcodes/manage/:productId  (ADMIN / PRINTER)
+// returns barcodes grouped by designCode for one product
+const listBarcodesByProduct = async (req, res) => {
+  try {
+    const { productId } = req.params;
+
+    // Guard against missing/invalid productId
+    if (!productId || productId === 'undefined') {
+      console.error('listBarcodesByProduct invalid productId:', productId);
+      return res.status(400).json({ message: 'Invalid productId in URL' });
+    }
+
+    const barcodes = await Barcode.find({ productId }).sort({
+      designCode: 1,
+      createdAt: -1,
+    });
+
+    // group by designCode
+    const byDesign = {};
+    for (const b of barcodes) {
+      const key = b.designCode;
+      if (!byDesign[key]) {
+        byDesign[key] = [];
+      }
+      byDesign[key].push(b);
+    }
+
+    res.json({ barcodesByDesign: byDesign });
+  } catch (err) {
+    console.error('List barcodes by product error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// PATCH /api/barcodes/:id/status  (ADMIN / PRINTER)
+// body: { status: 'AVAILABLE' | 'USED' }
+const updateBarcodeStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!['AVAILABLE', 'USED'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const barcode = await Barcode.findById(id);
+    if (!barcode) {
+      return res.status(404).json({ message: 'Barcode not found' });
+    }
+
+    barcode.status = status;
+    barcode.usedAt = status === 'USED' ? new Date() : null;
+    // packingSessionId stays as-is; you can later link it from scan flow
+    await barcode.save();
+
+    res.json({
+      message: 'Barcode status updated',
+      barcode,
+    });
+  } catch (err) {
+    console.error('Update barcode status error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = {
+  generateBarcodes,
+  listBarcodesByProduct,
+  updateBarcodeStatus,
+};

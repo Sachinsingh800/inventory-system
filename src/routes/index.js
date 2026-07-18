@@ -1,3 +1,4 @@
+// src/routes/index.js
 const { Router } = require('express');
 const authRoutes = require('./auth.routes');
 const categoryRoutes = require('./category.routes');

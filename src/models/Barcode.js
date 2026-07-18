@@ -1,3 +1,4 @@
+// models/Barcode.js
 const mongoose = require('mongoose');
 
 const barcodeSchema = new mongoose.Schema(
@@ -5,7 +6,7 @@ const barcodeSchema = new mongoose.Schema(
     code: {
       type: String,
       required: true,
-      unique: true,   // actual barcode/QR string
+      unique: true, // actual barcode/QR string
       trim: true,
     },
     productId: {
@@ -31,7 +32,7 @@ const barcodeSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'PackingSession',
       default: null,
-    }
+    },
   },
   { timestamps: true }
 );

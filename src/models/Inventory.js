@@ -1,3 +1,4 @@
+// models/Inventory.js
 const mongoose = require('mongoose');
 
 const inventorySchema = new mongoose.Schema(
@@ -32,13 +33,16 @@ const inventorySchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // optional: you can leave this or remove it; our join code does not rely on it
+    barcodes: {
+      type: [String],
+      default: [],
+    },
   },
   { timestamps: true }
 );
 
-// Ensure unique combination per inventory line:
-// RAW: productId + type = RAW, designCode = null
-// PRINTED: productId + type = PRINTED + designCode
+// Ensure unique combination per inventory line
 inventorySchema.index(
   { productId: 1, type: 1, designCode: 1 },
   { unique: true }
