@@ -1,7 +1,7 @@
+// controllers/purchase.controller.js
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
-
 
 // helper to build text summary like: "iPhone 16 - 350pcs, iPhone 11 - 50pcs"
 const buildTextSummary = async (items) => {
@@ -16,12 +16,17 @@ const buildTextSummary = async (items) => {
   return parts.join(', ');
 };
 
-
 // POST /api/purchase-orders  (ADMIN)
 const createPurchaseOrder = async (req, res) => {
   try {
     const { supplierName, notes, items } = req.body;
     const userId = req.user?.id; // comes from auth middleware
+
+    if (!supplierName || typeof supplierName !== 'string') {
+      return res
+        .status(400)
+        .json({ message: 'supplierName is required' });
+    }
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Items array is required' });
@@ -30,21 +35,21 @@ const createPurchaseOrder = async (req, res) => {
     // basic validation
     for (const item of items) {
       if (!item.productId || !item.orderedQty || item.orderedQty <= 0) {
-        return res
-          .status(400)
-          .json({ message: 'Each item must have productId and orderedQty > 0' });
+        return res.status(400).json({
+          message: 'Each item must have productId and orderedQty > 0',
+        });
       }
     }
 
     const textSummary = await buildTextSummary(items);
 
     const po = await PurchaseOrder.create({
-      supplierName,
-      notes,
+      supplierName: supplierName.trim(),
+      notes: notes ? String(notes).trim() : '',
       items,
       status: 'CREATED',
       textSummary,
-      createdBy: userId,
+      createdBy: userId || undefined,
     });
 
     res.status(201).json({
@@ -56,7 +61,6 @@ const createPurchaseOrder = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
-
 
 // POST /api/purchase-orders/:id/verify  (ADMIN)
 // Raw Stock Formula from BRD:
@@ -85,9 +89,9 @@ const verifyPurchaseOrder = async (req, res) => {
     const receivedMap = new Map();
     for (const item of items) {
       if (!item.productId || item.receivedQty == null || item.receivedQty < 0) {
-        return res
-          .status(400)
-          .json({ message: 'Each item must have productId and receivedQty >= 0' });
+        return res.status(400).json({
+          message: 'Each item must have productId and receivedQty >= 0',
+        });
       }
       receivedMap.set(String(item.productId), item.receivedQty);
     }
@@ -152,8 +156,24 @@ const verifyPurchaseOrder = async (req, res) => {
   }
 };
 
+// OPTIONAL: list POs so frontend can show supplier + notes
+// GET /api/purchase-orders  (ADMIN)
+const listPurchaseOrders = async (req, res) => {
+  try {
+    const pos = await PurchaseOrder.find()
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    res.json({ purchaseOrders: pos });
+  } catch (err) {
+    console.error('List purchase orders error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
 
 module.exports = {
   createPurchaseOrder,
   verifyPurchaseOrder,
+  listPurchaseOrders,
 };
