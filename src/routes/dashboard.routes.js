@@ -3,16 +3,15 @@ const { Router } = require('express');
 const auth = require('../middlewares/auth.middleware');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
+const PurchaseOrder = require('../models/PurchaseOrder');
 
 const router = Router();
 
 // GET /api/dashboard/inventory-products
 router.get('/inventory-products', auth(['ADMIN']), async (req, res) => {
   try {
-    // 1) Get all active products
     const products = await Product.find({ isActive: true }).populate('categoryId');
 
-    // 2) For each product, aggregate inventory
     const result = await Promise.all(
       products.map(async (p) => {
         const inventoryDocs = await Inventory.find({ productId: p._id }).sort({
@@ -31,7 +30,7 @@ router.get('/inventory-products', auth(['ADMIN']), async (req, res) => {
         );
 
         return {
-          id: p._id,
+          id: String(p._id),
           name: p.name,
           categoryName: p.categoryId?.name ?? '',
           rawQuantity,
@@ -44,6 +43,37 @@ router.get('/inventory-products', auth(['ADMIN']), async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('Dashboard inventory-products error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// NEW: GET /api/dashboard/inventory-supplier
+router.get('/inventory-supplier', auth(['ADMIN']), async (req, res) => {
+  try {
+    const pos = await PurchaseOrder.find()
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean();
+
+    const supplierByProduct = {};
+
+    for (const po of pos) {
+      for (const item of po.items || []) {
+        const pid = String(item.productId);
+        if (!supplierByProduct[pid]) {
+          supplierByProduct[pid] = {
+            supplierName: po.supplierName || '',
+            notes: po.notes || '',
+            purchaseOrderId: String(po._id),
+            status: po.status,
+          };
+        }
+      }
+    }
+
+    res.json({ supplierByProduct });
+  } catch (err) {
+    console.error('Dashboard inventory-supplier error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });

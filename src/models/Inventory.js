@@ -13,7 +13,6 @@ const inventorySchema = new mongoose.Schema(
       enum: ['RAW', 'PRINTED'],
       required: true,
     },
-    // null for RAW, set for PRINTED (e.g. "BUTTERFLY", "BOW_HEART")
     designCode: {
       type: String,
       default: null,
@@ -26,14 +25,13 @@ const inventorySchema = new mongoose.Schema(
     },
     minThreshold: {
       type: Number,
-      default: 0, // for alerts
+      default: 0,
       min: 0,
     },
     isActive: {
       type: Boolean,
       default: true,
     },
-    // optional: you can leave this or remove it; our join code does not rely on it
     barcodes: {
       type: [String],
       default: [],
@@ -42,7 +40,6 @@ const inventorySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Ensure unique combination per inventory line
 inventorySchema.index(
   { productId: 1, type: 1, designCode: 1 },
   { unique: true }
