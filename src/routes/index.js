@@ -19,8 +19,8 @@ router.use('/inventory', inventoryRoutes);
 router.use('/purchase-orders', purchaseRoutes);
 router.use('/printing-jobs', printingRoutes);
 router.use('/barcodes', barcodeRoutes);
-router.use('/packing-sessions', packingRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/packing', packingRoutes);
 
 router.get('/health', (req, res) => {
   res.json({ status: 'ok' });

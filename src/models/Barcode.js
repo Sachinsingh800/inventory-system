@@ -28,11 +28,12 @@ const barcodeSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    packingSessionId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'PackingSession',
-      default: null,
-    },
+    // if you want to track who scanned it (optional):
+    // usedBy: {
+    //   type: mongoose.Schema.Types.ObjectId,
+    //   ref: 'User',
+    //   default: null,
+    // },
   },
   { timestamps: true }
 );
