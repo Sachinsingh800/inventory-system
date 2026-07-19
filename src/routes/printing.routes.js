@@ -1,4 +1,4 @@
-// routes/printing.routes.js
+// src/routes/printing.routes.js
 const { Router } = require('express');
 const auth = require('../middlewares/auth.middleware');
 const {
@@ -19,7 +19,7 @@ router.get('/:id', auth(['ADMIN', 'PRINTER']), getPrintingJobById);
 router.put('/:id', auth(['ADMIN', 'PRINTER']), updatePrintingJob);
 router.delete('/:id', auth(['ADMIN', 'PRINTER']), deletePrintingJob);
 
-// all designs for one product (for barcodes)
+// designs for one product (for barcodes)
 router.get(
   '/designs/:productId',
   auth(['ADMIN', 'PRINTER']),

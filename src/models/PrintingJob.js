@@ -1,17 +1,18 @@
+// models/PrintingJob.js
 const mongoose = require('mongoose');
 
 const printingItemSchema = new mongoose.Schema(
   {
     designCode: {
       type: String,
-      required: true,   // e.g. "BUTTERFLY", "BOW_HEART"
+      required: true, // e.g. "BUTTERFLY", "BOW_HEART"
       trim: true,
     },
     quantity: {
       type: Number,
       required: true,
       min: 1,
-    }
+    },
   },
   { _id: false }
 );
@@ -37,10 +38,15 @@ const printingJobSchema = new mongoose.Schema(
       enum: ['CREATED', 'COMPLETED', 'CANCELLED'],
       default: 'CREATED',
     },
+    notes: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-    }
+    },
   },
   { timestamps: true }
 );

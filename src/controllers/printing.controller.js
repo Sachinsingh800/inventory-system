@@ -1,12 +1,13 @@
-// controllers/printing.controller.js
+// src/controllers/printing.controller.js
+const mongoose = require('mongoose');
 const PrintingJob = require('../models/PrintingJob');
 const Inventory = require('../models/Inventory');
 const Product = require('../models/Product');
 
-// POST /api/printing-jobs  (ADMIN / PRINTER)
+// POST /api/printing-jobs (ADMIN / PRINTER)
 const createPrintingJob = async (req, res) => {
   try {
-    const { productId, items } = req.body;
+    const { productId, items, status, notes } = req.body;
     const userId = req.user?.id;
 
     if (!productId) {
@@ -30,10 +31,8 @@ const createPrintingJob = async (req, res) => {
       return res.status(400).json({ message: 'Invalid or inactive product' });
     }
 
-    // calculate total demand
     const totalDemand = items.reduce((sum, item) => sum + item.quantity, 0);
 
-    // get raw inventory for this product
     const rawInv = await Inventory.findOne({
       productId,
       type: 'RAW',
@@ -48,11 +47,13 @@ const createPrintingJob = async (req, res) => {
       });
     }
 
-    // 1. Raw stock deducted
+    const validStatuses = ['CREATED', 'COMPLETED', 'CANCELLED'];
+    const initialStatus = validStatuses.includes(status) ? status : 'COMPLETED';
+
+    // RAW → PRINTED movement
     rawInv.quantity -= totalDemand;
     await rawInv.save();
 
-    // 2. Printed stock increments per design
     for (const item of items) {
       const { designCode, quantity } = item;
 
@@ -67,7 +68,7 @@ const createPrintingJob = async (req, res) => {
           productId,
           type: 'PRINTED',
           designCode,
-          quantity: quantity,
+          quantity,
           minThreshold: 0,
           isActive: true,
         });
@@ -77,17 +78,17 @@ const createPrintingJob = async (req, res) => {
       }
     }
 
-    // save printing job record
     const job = await PrintingJob.create({
       productId,
       items,
       totalDemand,
-      status: 'COMPLETED',
+      status: initialStatus,
+      notes: notes?.trim() || '',
       createdBy: userId,
     });
 
     return res.status(201).json({
-      message: 'Printing job completed; inventory updated',
+      message: 'Printing job created; inventory updated',
       printingJob: job,
     });
   } catch (err) {
@@ -96,14 +97,13 @@ const createPrintingJob = async (req, res) => {
   }
 };
 
-// GET /api/printing-jobs  (list all, optional ?productId=)
+// GET /api/printing-jobs (?productId=&status=)
 const listPrintingJobs = async (req, res) => {
   try {
-    const { productId } = req.query;
+    const { productId, status } = req.query;
     const filter = {};
-    if (productId) {
-      filter.productId = productId;
-    }
+    if (productId) filter.productId = productId;
+    if (status) filter.status = status;
 
     const jobs = await PrintingJob.find(filter)
       .populate('productId', 'name')
@@ -122,6 +122,10 @@ const getPrintingJobById = async (req, res) => {
   try {
     const { id } = req.params;
 
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid job id' });
+    }
+
     const job = await PrintingJob.findById(id)
       .populate('productId', 'name')
       .populate('createdBy', 'name email');
@@ -137,10 +141,18 @@ const getPrintingJobById = async (req, res) => {
   }
 };
 
-// PUT /api/printing-jobs/:id   (e.g. update status/notes)
+// PUT /api/printing-jobs/:id
 const updatePrintingJob = async (req, res) => {
   try {
     const { id } = req.params;
+
+    console.log('updatePrintingJob called with id =', id);
+
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      console.warn('updatePrintingJob invalid id:', id);
+      return res.status(400).json({ message: 'Invalid job id' });
+    }
+
     const allowed = ['status', 'notes'];
     const update = {};
 
@@ -148,6 +160,17 @@ const updatePrintingJob = async (req, res) => {
       if (req.body[key] !== undefined) {
         update[key] = req.body[key];
       }
+    }
+
+    if (update.status) {
+      const validStatuses = ['CREATED', 'COMPLETED', 'CANCELLED'];
+      if (!validStatuses.includes(update.status)) {
+        return res.status(400).json({ message: 'Invalid status value' });
+      }
+    }
+
+    if (update.notes && typeof update.notes === 'string') {
+      update.notes = update.notes.trim();
     }
 
     const job = await PrintingJob.findByIdAndUpdate(id, update, {
@@ -170,6 +193,10 @@ const deletePrintingJob = async (req, res) => {
   try {
     const { id } = req.params;
 
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid job id' });
+    }
+
     const job = await PrintingJob.findByIdAndDelete(id);
 
     if (!job) {
@@ -186,10 +213,13 @@ const deletePrintingJob = async (req, res) => {
 };
 
 // GET /api/printing-jobs/designs/:productId
-// all PRINTED designs for one product (for barcode screen)
 const getPrintedDesignsByProduct = async (req, res) => {
   try {
     const { productId } = req.params;
+
+    if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(400).json({ message: 'Invalid product id' });
+    }
 
     const product = await Product.findById(productId);
     if (!product || !product.isActive) {
