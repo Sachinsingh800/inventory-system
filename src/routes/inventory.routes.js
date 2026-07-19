@@ -10,22 +10,52 @@ const router = Router();
 // upsert raw inventory for a product (admin)
 router.post('/raw', auth(['ADMIN']), upsertRawInventory);
 
-// existing simple GET /api/inventory/:productId
+// ALL LOW-STOCK INVENTORY (RAW + PRINTED)
 router.get(
-  '/:productId',
+  '/low-stock',
   auth(['ADMIN', 'PRINTER', 'PACKER']),
   async (req, res) => {
     try {
-      const { productId } = req.params;
-      const inventory = await Inventory.find({ productId }).sort({
+      // quantity < minThreshold and isActive = true
+      const lowStock = await Inventory.find({
+        isActive: true,
+        minThreshold: { $gt: 0 },
+        $expr: { $lt: ['$quantity', '$minThreshold'] },
+      }).sort({
+        productId: 1,
         type: 1,
         designCode: 1,
       });
 
-      res.json({ inventory });
+      return res.json({ inventory: lowStock });
     } catch (err) {
-      console.error('Get inventory error', err);
-      res.status(500).json({ message: 'Server error' });
+      console.error('Get low-stock inventory error', err);
+      return res.status(500).json({ message: 'Server error' });
+    }
+  }
+);
+
+// existing simple GET /api/inventory/:productId
+// LOW-STOCK FOR ONE PRODUCT
+router.get(
+  '/low-stock/:productId',
+  auth(['ADMIN', 'PRINTER', 'PACKER']),
+  async (req, res) => {
+    try {
+      const { productId } = req.params;
+
+      const lowStock = await Inventory.find({
+        productId,
+        isActive: true,
+        minThreshold: { $gt: 0 },
+        $expr: { $lt: ['$quantity', '$minThreshold'] },
+      }).sort({ type: 1, designCode: 1 });
+
+      // Optional: treat "no low stock" as empty list, not 404
+      return res.json({ inventory: lowStock });
+    } catch (err) {
+      console.error('Get low-stock inventory by product error', err);
+      return res.status(500).json({ message: 'Server error' });
     }
   }
 );
