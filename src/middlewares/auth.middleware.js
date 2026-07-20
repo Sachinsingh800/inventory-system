@@ -14,15 +14,19 @@ const auth = (allowedRoles = []) => {
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      req.user = { id: decoded.userId, role: decoded.role };
 
-      if (allowedRoles.length && !allowedRoles.includes(decoded.role)) {
+      req.user = {
+        id: decoded.userId,
+        role: decoded.role,
+      };
+
+      if (allowedRoles.length > 0 && !allowedRoles.includes(decoded.role)) {
         return res.status(403).json({ message: 'Forbidden: insufficient role' });
       }
 
       next();
     } catch (err) {
-      console.error('Auth error', err);
+      console.error('Auth error:', err);
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
   };
