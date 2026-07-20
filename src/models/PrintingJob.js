@@ -35,8 +35,8 @@ const printingJobSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['CREATED', 'COMPLETED', 'CANCELLED'],
-      default: 'CREATED',
+      enum: ['PENDING', 'COMPLETED', 'CANCELLED'],
+      default: 'PENDING',
     },
     notes: {
       type: String,

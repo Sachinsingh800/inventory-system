@@ -47,8 +47,8 @@ const createPrintingJob = async (req, res) => {
       });
     }
 
-    const validStatuses = ['CREATED', 'COMPLETED', 'CANCELLED'];
-    const initialStatus = validStatuses.includes(status) ? status : 'COMPLETED';
+    const validStatuses = ['PENDING', 'COMPLETED', 'CANCELLED'];
+    const initialStatus = validStatuses.includes(status) ? status : 'PENDING';
 
     // RAW → PRINTED movement
     rawInv.quantity -= totalDemand;
@@ -163,7 +163,7 @@ const updatePrintingJob = async (req, res) => {
     }
 
     if (update.status) {
-      const validStatuses = ['CREATED', 'COMPLETED', 'CANCELLED'];
+      const validStatuses = ['PENDING', 'COMPLETED', 'CANCELLED'];
       if (!validStatuses.includes(update.status)) {
         return res.status(400).json({ message: 'Invalid status value' });
       }
