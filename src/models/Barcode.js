@@ -1,4 +1,3 @@
-// models/Barcode.js
 const mongoose = require('mongoose');
 
 const barcodeSchema = new mongoose.Schema(
@@ -6,7 +5,7 @@ const barcodeSchema = new mongoose.Schema(
     code: {
       type: String,
       required: true,
-      unique: true, // actual barcode/QR string
+      unique: true,
       trim: true,
     },
     productId: {
@@ -16,7 +15,7 @@ const barcodeSchema = new mongoose.Schema(
     },
     designCode: {
       type: String,
-      required: true, // matches Inventory.designCode for PRINTED
+      required: true,
       trim: true,
     },
     status: {
@@ -28,12 +27,6 @@ const barcodeSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    // if you want to track who scanned it (optional):
-    // usedBy: {
-    //   type: mongoose.Schema.Types.ObjectId,
-    //   ref: 'User',
-    //   default: null,
-    // },
   },
   { timestamps: true }
 );
