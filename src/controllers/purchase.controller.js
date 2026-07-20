@@ -1,9 +1,9 @@
-// controllers/purchase.controller.js
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
 
-// helper to build text summary like: "iPhone 16 - 350pcs, iPhone 11 - 50pcs"
+const allowedStatuses = ['PENDING', 'CREATED', 'VERIFIED', 'PARTIAL'];
+
 const buildTextSummary = async (items) => {
   const parts = [];
 
@@ -16,23 +16,26 @@ const buildTextSummary = async (items) => {
   return parts.join(', ');
 };
 
-// POST /api/purchase-orders  (ADMIN)
 const createPurchaseOrder = async (req, res) => {
   try {
-    const { supplierName, notes, items } = req.body;
-    const userId = req.user?.id; // comes from auth middleware
+    const { supplierName, notes, items, status, purchaseDate } = req.body;
+    const userId = req.user?.id;
 
     if (!supplierName || typeof supplierName !== 'string') {
-      return res
-        .status(400)
-        .json({ message: 'supplierName is required' });
+      return res.status(400).json({ message: 'supplierName is required' });
     }
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Items array is required' });
     }
 
-    // basic validation
+    if (status && !allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        message: 'Invalid status',
+        allowedStatuses,
+      });
+    }
+
     for (const item of items) {
       if (!item.productId || !item.orderedQty || item.orderedQty <= 0) {
         return res.status(400).json({
@@ -46,8 +49,9 @@ const createPurchaseOrder = async (req, res) => {
     const po = await PurchaseOrder.create({
       supplierName: supplierName.trim(),
       notes: notes ? String(notes).trim() : '',
+      purchaseDate: purchaseDate ? new Date(purchaseDate) : new Date(),
       items,
-      status: 'CREATED',
+      status: status || 'PENDING',
       textSummary,
       createdBy: userId || undefined,
     });
@@ -62,13 +66,10 @@ const createPurchaseOrder = async (req, res) => {
   }
 };
 
-// POST /api/purchase-orders/:id/verify  (ADMIN)
-// Raw Stock Formula from BRD:
-// New Raw Stock = Current Raw Stock + Fresh Arrived Stock
 const verifyPurchaseOrder = async (req, res) => {
   try {
     const { id } = req.params;
-    const { items } = req.body; // [{ productId, receivedQty }]
+    const { items } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Items array is required' });
@@ -85,7 +86,6 @@ const verifyPurchaseOrder = async (req, res) => {
         .json({ message: 'Purchase order already fully verified' });
     }
 
-    // Map receivedQty by productId for quick lookup
     const receivedMap = new Map();
     for (const item of items) {
       if (!item.productId || item.receivedQty == null || item.receivedQty < 0) {
@@ -98,12 +98,10 @@ const verifyPurchaseOrder = async (req, res) => {
 
     let allMatched = true;
 
-    // Loop through PO items, update receivedQty and raw inventory
     for (const item of po.items) {
       const key = String(item.productId);
 
       if (!receivedMap.has(key)) {
-        // if not provided in this verify call, skip for now
         if (item.receivedQty < item.orderedQty) {
           allMatched = false;
         }
@@ -111,17 +109,12 @@ const verifyPurchaseOrder = async (req, res) => {
       }
 
       const receivedQty = receivedMap.get(key);
-
-      // update receivedQty in PO line
       item.receivedQty += receivedQty;
 
-      // if still less than ordered, PO remains PARTIAL
       if (item.receivedQty < item.orderedQty) {
         allMatched = false;
       }
 
-      // RAW STOCK FORMULA:
-      // New Raw Stock = Current Raw Stock + Fresh Arrived Stock
       const rawInv = await Inventory.findOne({
         productId: item.productId,
         type: 'RAW',
@@ -156,8 +149,6 @@ const verifyPurchaseOrder = async (req, res) => {
   }
 };
 
-// OPTIONAL: list POs so frontend can show supplier + notes
-// GET /api/purchase-orders  (ADMIN)
 const listPurchaseOrders = async (req, res) => {
   try {
     const pos = await PurchaseOrder.find()
@@ -172,8 +163,57 @@ const listPurchaseOrders = async (req, res) => {
   }
 };
 
+const updatePurchaseOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, purchaseDate, supplierName, notes } = req.body;
+
+    const po = await PurchaseOrder.findById(id);
+    if (!po) {
+      return res.status(404).json({ message: 'Purchase order not found' });
+    }
+
+    if (status !== undefined) {
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          message: 'Invalid status',
+          allowedStatuses,
+        });
+      }
+      po.status = status;
+    }
+
+    if (purchaseDate !== undefined) {
+      const d = new Date(purchaseDate);
+      if (Number.isNaN(d.getTime())) {
+        return res.status(400).json({ message: 'Invalid purchaseDate' });
+      }
+      po.purchaseDate = d;
+    }
+
+    if (supplierName !== undefined) {
+      po.supplierName = String(supplierName).trim();
+    }
+
+    if (notes !== undefined) {
+      po.notes = String(notes).trim();
+    }
+
+    await po.save();
+
+    res.json({
+      message: 'Purchase order updated successfully',
+      purchaseOrder: po,
+    });
+  } catch (err) {
+    console.error('Update purchase order error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 module.exports = {
   createPurchaseOrder,
   verifyPurchaseOrder,
   listPurchaseOrders,
+  updatePurchaseOrder,
 };

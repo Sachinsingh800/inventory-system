@@ -25,13 +25,17 @@ const purchaseOrderSchema = new mongoose.Schema(
   {
     supplierName: {
       type: String,
-      required: true,   // every PO must have supplier
+      required: true,
       trim: true,
     },
     notes: {
       type: String,
       trim: true,
       default: '',
+    },
+    purchaseDate: {
+      type: Date,
+      default: Date.now,
     },
     items: {
       type: [purchaseItemSchema],
@@ -45,10 +49,10 @@ const purchaseOrderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['CREATED', 'VERIFIED', 'PARTIAL'],
-      default: 'CREATED',
+      enum: ['PENDING', 'CREATED', 'VERIFIED', 'PARTIAL'],
+      default: 'PENDING',
+      required: true,
     },
-    // optional plain text summary for WhatsApp
     textSummary: {
       type: String,
       default: '',
