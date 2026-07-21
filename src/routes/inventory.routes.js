@@ -16,16 +16,60 @@ router.get(
   auth(['ADMIN', 'PRINTER', 'PACKER']),
   async (req, res) => {
     try {
-      // quantity < minThreshold and isActive = true
-      const lowStock = await Inventory.find({
-        isActive: true,
-        minThreshold: { $gt: 0 },
-        $expr: { $lt: ['$quantity', '$minThreshold'] },
-      }).sort({
-        productId: 1,
-        type: 1,
-        designCode: 1,
-      });
+      const pipeline = [
+        {
+          $match: {
+            isActive: true,
+            minThreshold: { $gt: 0 },
+            $expr: { $lt: ['$quantity', '$minThreshold'] },
+          },
+        },
+        {
+          $lookup: {
+            from: 'products',              // name of Product collection
+            localField: 'productId',
+            foreignField: '_id',
+            as: 'product',
+          },
+        },
+        { $unwind: '$product' },
+        {
+          $lookup: {
+            from: 'categories',            // name of Category collection
+            localField: 'product.categoryId',
+            foreignField: '_id',
+            as: 'category',
+          },
+        },
+        { $unwind: { path: '$category', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 1,
+            productId: 1,
+            type: 1,
+            designCode: 1,
+            quantity: 1,
+            minThreshold: 1,
+            isActive: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            'product.name': 1,
+            'product.skuBase': 1,
+            'product._id': 1,
+            'category._id': 1,
+            'category.name': 1,
+          },
+        },
+        {
+          $sort: {
+            'product.name': 1,
+            type: 1,
+            designCode: 1,
+          },
+        },
+      ];
+
+      const lowStock = await Inventory.aggregate(pipeline);
 
       return res.json({ inventory: lowStock });
     } catch (err) {
