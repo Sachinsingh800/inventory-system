@@ -1,21 +1,4 @@
-// models/PrintingJob.js
 const mongoose = require('mongoose');
-
-const printingItemSchema = new mongoose.Schema(
-  {
-    designCode: {
-      type: String,
-      required: true, // e.g. "BUTTERFLY", "BOW_HEART"
-      trim: true,
-    },
-    quantity: {
-      type: Number,
-      required: true,
-      min: 1,
-    },
-  },
-  { _id: false }
-);
 
 const printingJobSchema = new mongoose.Schema(
   {
@@ -24,11 +7,18 @@ const printingJobSchema = new mongoose.Schema(
       ref: 'Product',
       required: true,
     },
-    items: {
-      type: [printingItemSchema],
+    designId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ProductDesign',
       required: true,
     },
-    totalDemand: {
+    designCode: {
+      type: String,
+      required: true,
+      trim: true,
+      uppercase: true,
+    },
+    quantity: {
       type: Number,
       required: true,
       min: 1,
@@ -42,6 +32,10 @@ const printingJobSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: '',
+    },
+    inventoryAdded: {
+      type: Boolean,
+      default: false,
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,

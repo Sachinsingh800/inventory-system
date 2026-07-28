@@ -1,236 +1,310 @@
-const mongoose = require('mongoose');
-const Barcode = require('../models/Barcode');
-const Product = require('../models/Product');
-const Inventory = require('../models/Inventory');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
+const Barcode = require('../models/Barcode');
+const Inventory = require('../models/Inventory');
+const ProductDesign = require('../models/ProductDesign');
+
+const makeBarcodeCode = (designCode) => {
+  const safeDesignCode = String(designCode)
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .toUpperCase();
+
+  const randomPart = crypto
+    .randomUUID()
+    .replace(/-/g, '')
+    .slice(0, 10)
+    .toUpperCase();
+
+  return `PR-${safeDesignCode}-${randomPart}`;
+};
+
+// POST /api/barcodes
+// body: { productId, designId, quantity }
+//
+// Flow:
+// 1. Check RAW inventory
+// 2. Decrease RAW quantity
+// 3. Generate barcode records
+// 4. Increase PRINTED quantity
 const generateBarcodes = async (req, res) => {
   try {
-    const { productId, designCode, quantity } = req.body;
+    const { productId, designId, quantity } = req.body;
 
-    if (!productId || !designCode || !quantity || quantity <= 0) {
+    if (!productId || !designId) {
       return res.status(400).json({
-        message: 'productId, designCode and quantity > 0 are required',
+        message: 'productId and designId are required',
       });
     }
 
-    const product = await Product.findById(productId);
-    if (!product || !product.isActive) {
-      return res.status(400).json({ message: 'Invalid or inactive product' });
+    const barcodeQuantity = Number(quantity);
+
+    if (!Number.isInteger(barcodeQuantity) || barcodeQuantity < 1) {
+      return res.status(400).json({
+        message: 'quantity must be a whole number greater than 0',
+      });
     }
 
-    const printedInv = await Inventory.findOne({
+    const design = await ProductDesign.findOne({
+      _id: designId,
       productId,
-      type: 'PRINTED',
-      designCode,
+      isActive: true,
     });
 
-    if (!printedInv || printedInv.quantity < quantity) {
+    if (!design) {
       return res.status(400).json({
-        message: 'Not enough printed stock to generate labels',
-        available: printedInv ? printedInv.quantity : 0,
-        requested: quantity,
+        message: 'Selected model/design does not belong to this product',
       });
     }
 
-    const barcodes = [];
-
-    for (let i = 0; i < quantity; i++) {
-      const code = `${product.skuBase}-${designCode}-${uuidv4()}`;
-      const barcode = await Barcode.create({
-        code,
+    // Remove quantity from selected design RAW inventory.
+    const rawInventory = await Inventory.findOneAndUpdate(
+      {
         productId,
-        designCode,
-        status: 'AVAILABLE',
+        type: 'RAW',
+        designCode: design.designCode,
+        quantity: { $gte: barcodeQuantity },
+      },
+      {
+        $inc: {
+          quantity: -barcodeQuantity,
+        },
+      },
+      {
+        new: true,
+      }
+    );
+
+    if (!rawInventory) {
+      return res.status(400).json({
+        message: `Insufficient RAW stock for design: ${design.designCode}`,
       });
-      barcodes.push(barcode);
     }
+
+    const barcodeDocuments = Array.from(
+      { length: barcodeQuantity },
+      () => ({
+        code: makeBarcodeCode(design.designCode),
+        productId,
+        designCode: design.designCode,
+        status: 'AVAILABLE',
+      })
+    );
+
+    let createdBarcodes;
+
+    try {
+      createdBarcodes = await Barcode.insertMany(barcodeDocuments);
+    } catch (barcodeError) {
+      // Restore RAW quantity if barcode creation fails.
+      await Inventory.findOneAndUpdate(
+        {
+          productId,
+          type: 'RAW',
+          designCode: design.designCode,
+        },
+        {
+          $inc: {
+            quantity: barcodeQuantity,
+          },
+        }
+      );
+
+      throw barcodeError;
+    }
+
+    const barcodeCodes = createdBarcodes.map((barcode) => barcode.code);
+
+    const printedInventory = await Inventory.findOneAndUpdate(
+      {
+        productId,
+        type: 'PRINTED',
+        designCode: design.designCode,
+      },
+      {
+        $inc: {
+          quantity: barcodeQuantity,
+        },
+        $push: {
+          barcodes: {
+            $each: barcodeCodes,
+          },
+        },
+        $set: {
+          isActive: true,
+        },
+        $setOnInsert: {
+          productId,
+          type: 'PRINTED',
+          designCode: design.designCode,
+          minThreshold: 0,
+        },
+      },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
+      }
+    );
 
     res.status(201).json({
-      message: 'Barcodes generated successfully',
-      barcodes,
+      message: 'Barcodes generated and stock moved from RAW to PRINTED',
+      design: {
+        id: design._id,
+        name: design.name,
+        mode: design.mode,
+        designCode: design.designCode,
+      },
+      rawInventory: {
+        id: rawInventory._id,
+        quantity: rawInventory.quantity,
+      },
+      printedInventory: {
+        id: printedInventory._id,
+        quantity: printedInventory.quantity,
+      },
+      barcodeCount: createdBarcodes.length,
+      barcodes: createdBarcodes,
     });
   } catch (err) {
-    console.error('Generate barcodes error', err);
+    console.error('Generate barcodes error:', err);
+
+    if (err.code === 11000) {
+      return res.status(409).json({
+        message: 'A duplicate barcode was generated. Please try again.',
+      });
+    }
+
     res.status(500).json({ message: 'Server error' });
   }
 };
 
+// GET /api/barcodes/manage/:productId
+// Optional query: ?designCode=BUTTERFLY_2
 const listBarcodesByProduct = async (req, res) => {
   try {
-    const { productId } = req.params;
+    const filter = {
+      productId: req.params.productId,
+    };
 
-    if (!productId || productId === 'undefined' || !mongoose.Types.ObjectId.isValid(productId)) {
-      return res.status(400).json({ message: 'Invalid productId in URL' });
+    if (req.query.designCode) {
+      filter.designCode = req.query.designCode;
     }
 
-    const barcodes = await Barcode.find({ productId }).sort({
-      designCode: 1,
-      createdAt: -1,
+    const barcodes = await Barcode.find(filter).sort({ createdAt: -1 });
+
+    const barcodesByDesign = barcodes.reduce((result, barcode) => {
+      const designCode = barcode.designCode || 'NO_DESIGN';
+
+      if (!result[designCode]) {
+        result[designCode] = [];
+      }
+
+      result[designCode].push(barcode);
+      return result;
+    }, {});
+
+    res.json({
+      barcodes,
+      barcodesByDesign,
     });
-
-    const byDesign = {};
-    for (const b of barcodes) {
-      if (!byDesign[b.designCode]) byDesign[b.designCode] = [];
-      byDesign[b.designCode].push(b);
-    }
-
-    res.json({ barcodesByDesign: byDesign });
   } catch (err) {
-    console.error('List barcodes by product error', err);
+    console.error('List barcodes error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
+// PATCH /api/barcodes/:id/status
+// body: { status: 'AVAILABLE' | 'USED' }
 const updateBarcodeStatus = async (req, res) => {
   try {
-    const { id } = req.params;
     const { status } = req.body;
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid barcode id' });
-    }
-
     if (!['AVAILABLE', 'USED'].includes(status)) {
-      return res.status(400).json({ message: 'Invalid status' });
+      return res.status(400).json({
+        message: 'status must be AVAILABLE or USED',
+      });
     }
 
-    const barcode = await Barcode.findById(id);
+    const barcode = await Barcode.findById(req.params.id);
+
     if (!barcode) {
-      return res.status(404).json({ message: 'Barcode not found' });
+      return res.status(404).json({
+        message: 'Barcode not found',
+      });
     }
 
     barcode.status = status;
     barcode.usedAt = status === 'USED' ? new Date() : null;
+
     await barcode.save();
 
     res.json({
-      message: 'Barcode status updated',
+      message: 'Barcode status updated successfully',
       barcode,
     });
   } catch (err) {
-    console.error('Update barcode status error', err);
+    console.error('Update barcode status error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
+// GET /api/barcodes/report/today?productId=optionalProductId
 const getBarcodeTodayReport = async (req, res) => {
   try {
-    const { productId } = req.query;
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
 
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
 
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
+    const filter = {
+      createdAt: {
+        $gte: startOfDay,
+        $lte: endOfDay,
+      },
+    };
 
-    const productMatch = {};
-    if (productId) {
-      if (!mongoose.Types.ObjectId.isValid(productId)) {
-        return res.status(400).json({ message: 'Invalid productId' });
-      }
-      productMatch.productId = new mongoose.Types.ObjectId(productId);
+    if (req.query.productId) {
+      filter.productId = req.query.productId;
     }
 
-    const generatedAgg = await Barcode.aggregate([
-      { $match: productMatch },
+    const report = await Barcode.aggregate([
       {
-        $group: {
-          _id: '$productId',
-          generatedTotal: { $sum: 1 },
-        },
-      },
-    ]);
-
-    const usedTodayAgg = await Barcode.aggregate([
-      {
-        $match: {
-          ...productMatch,
-          status: 'USED',
-          usedAt: { $gte: start, $lte: end },
-        },
+        $match: filter,
       },
       {
         $group: {
-          _id: '$productId',
-          scannedToday: { $sum: 1 },
-          barcodes: {
-            $push: {
-              id: '$_id',
-              code: '$code',
-              designCode: '$designCode',
-              usedAt: '$usedAt',
-            },
+          _id: {
+            productId: '$productId',
+            designCode: '$designCode',
+            status: '$status',
+          },
+          quantity: {
+            $sum: 1,
           },
         },
       },
-    ]);
-
-    const totalUsedAgg = await Barcode.aggregate([
       {
-        $match: {
-          ...productMatch,
-          status: 'USED',
-        },
-      },
-      {
-        $group: {
-          _id: '$productId',
-          totalScanned: { $sum: 1 },
+        $sort: {
+          '_id.designCode': 1,
+          '_id.status': 1,
         },
       },
     ]);
 
-    const productIds = [
-      ...new Set([
-        ...generatedAgg.map((x) => String(x._id)),
-        ...usedTodayAgg.map((x) => String(x._id)),
-        ...totalUsedAgg.map((x) => String(x._id)),
-      ]),
-    ];
-
-    const products = await Product.find({ _id: { $in: productIds } })
-      .select('name skuBase categoryId')
-      .lean();
-
-    const productMap = new Map(products.map((p) => [String(p._id), p]));
-    const generatedMap = new Map(generatedAgg.map((x) => [String(x._id), x.generatedTotal]));
-    const usedTodayMap = new Map(usedTodayAgg.map((x) => [String(x._id), x]));
-    const totalUsedMap = new Map(totalUsedAgg.map((x) => [String(x._id), x.totalScanned]));
-
-    const report = productIds.map((pid) => {
-      const generatedTotal = generatedMap.get(pid) || 0;
-      const todayObj = usedTodayMap.get(pid);
-      const scannedToday = todayObj?.scannedToday || 0;
-      const totalScanned = totalUsedMap.get(pid) || 0;
-      const remaining = Math.max(generatedTotal - totalScanned, 0);
-      const p = productMap.get(pid);
-
-      return {
-        productId: pid,
-        productName: p?.name || 'Unknown Product',
-        skuBase: p?.skuBase || '',
-        categoryId: p?.categoryId || null,
-        generatedTotal,
-        scannedToday,
-        totalScanned,
-        remaining,
-        todayScannedBarcodes: todayObj?.barcodes || [],
-      };
-    });
-
-    report.sort((a, b) => b.scannedToday - a.scannedToday);
+    const totalGenerated = report.reduce(
+      (sum, item) => sum + item.quantity,
+      0
+    );
 
     res.json({
-      date: 'today',
-      scanDate: new Date().toISOString(),
-      start,
-      end,
-      count: report.length,
+      totalGenerated,
       report,
     });
   } catch (err) {
-    console.error('Get barcode today report error', err);
+    console.error('Get barcode today report error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };

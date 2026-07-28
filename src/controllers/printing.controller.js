@@ -1,244 +1,233 @@
-// src/controllers/printing.controller.js
-const mongoose = require('mongoose');
 const PrintingJob = require('../models/PrintingJob');
+const ProductDesign = require('../models/ProductDesign');
 const Inventory = require('../models/Inventory');
-const Product = require('../models/Product');
 
-// POST /api/printing-jobs (ADMIN / PRINTER)
+// POST /api/printing-jobs
+// Adds selected model/design quantity to RAW inventory.
 const createPrintingJob = async (req, res) => {
   try {
-    const { productId, items, status, notes } = req.body;
-    const userId = req.user?.id;
-
-    if (!productId) {
-      return res.status(400).json({ message: 'productId is required' });
-    }
-
-    if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: 'items array is required' });
-    }
-
-    for (const item of items) {
-      if (!item.designCode || !item.quantity || item.quantity <= 0) {
-        return res
-          .status(400)
-          .json({ message: 'Each item must have designCode and quantity > 0' });
-      }
-    }
-
-    const product = await Product.findById(productId);
-    if (!product || !product.isActive) {
-      return res.status(400).json({ message: 'Invalid or inactive product' });
-    }
-
-    const totalDemand = items.reduce((sum, item) => sum + item.quantity, 0);
-
-    const rawInv = await Inventory.findOne({
+    const {
       productId,
-      type: 'RAW',
-      designCode: null,
+      designId,
+      quantity,
+      status = 'PENDING',
+      notes = '',
+    } = req.body;
+
+    if (!productId || !designId) {
+      return res.status(400).json({
+        message: 'productId and designId are required',
+      });
+    }
+
+    if (!quantity || Number(quantity) < 1) {
+      return res.status(400).json({
+        message: 'quantity must be greater than 0',
+      });
+    }
+
+    if (!['PENDING', 'COMPLETED', 'CANCELLED'].includes(status)) {
+      return res.status(400).json({
+        message: 'Invalid status',
+      });
+    }
+
+    const design = await ProductDesign.findOne({
+      _id: designId,
+      productId,
+      isActive: true,
     });
 
-    if (!rawInv || rawInv.quantity < totalDemand) {
+    if (!design) {
       return res.status(400).json({
-        message: 'Insufficient raw stock for printing',
-        currentRaw: rawInv ? rawInv.quantity : 0,
-        required: totalDemand,
+        message: 'Selected model/design is invalid for this product',
       });
     }
 
-    const validStatuses = ['PENDING', 'COMPLETED', 'CANCELLED'];
-    const initialStatus = validStatuses.includes(status) ? status : 'PENDING';
-
-    // RAW → PRINTED movement
-    rawInv.quantity -= totalDemand;
-    await rawInv.save();
-
-    for (const item of items) {
-      const { designCode, quantity } = item;
-
-      let printedInv = await Inventory.findOne({
+    // Add to RAW inventory only.
+    const rawInventory = await Inventory.findOneAndUpdate(
+      {
         productId,
-        type: 'PRINTED',
-        designCode,
-      });
-
-      if (!printedInv) {
-        printedInv = await Inventory.create({
-          productId,
-          type: 'PRINTED',
-          designCode,
-          quantity,
-          minThreshold: 0,
+        type: 'RAW',
+        designCode: design.designCode,
+      },
+      {
+        $inc: {
+          quantity: Number(quantity),
+        },
+        $set: {
           isActive: true,
-        });
-      } else {
-        printedInv.quantity += quantity;
-        await printedInv.save();
+        },
+        $setOnInsert: {
+          productId,
+          type: 'RAW',
+          designCode: design.designCode,
+          minThreshold: 0,
+          barcodes: [],
+        },
+      },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
       }
-    }
+    );
 
-    const job = await PrintingJob.create({
+    // Save history only. Do not add anything to PRINTED inventory here.
+    const printingJob = await PrintingJob.create({
       productId,
-      items,
-      totalDemand,
-      status: initialStatus,
-      notes: notes?.trim() || '',
-      createdBy: userId,
+      designId,
+      designCode: design.designCode,
+      quantity: Number(quantity),
+      status,
+      notes,
+      inventoryAdded: false,
+      createdBy: req.user?._id || req.user?.id,
     });
 
     return res.status(201).json({
-      message: 'Printing job created; inventory updated',
-      printingJob: job,
+      message: 'Model/design quantity added to RAW inventory successfully',
+      printingJob,
+      rawInventory,
     });
   } catch (err) {
-    console.error('Create printing job error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Create printing job error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+    });
   }
 };
 
-// GET /api/printing-jobs (?productId=&status=)
+// GET /api/printing-jobs
 const listPrintingJobs = async (req, res) => {
   try {
-    const { productId, status } = req.query;
-    const filter = {};
-    if (productId) filter.productId = productId;
-    if (status) filter.status = status;
-
-    const jobs = await PrintingJob.find(filter)
-      .populate('productId', 'name')
+    const printingJobs = await PrintingJob.find()
+      .populate('productId', 'name skuBase')
+      .populate('designId', 'name mode designCode')
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 });
 
-    return res.status(200).json({ jobs });
+    return res.json({ printingJobs });
   } catch (err) {
-    console.error('List printing jobs error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('List printing jobs error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+    });
   }
 };
 
 // GET /api/printing-jobs/:id
 const getPrintingJobById = async (req, res) => {
   try {
-    const { id } = req.params;
-
-    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid job id' });
-    }
-
-    const job = await PrintingJob.findById(id)
-      .populate('productId', 'name')
+    const printingJob = await PrintingJob.findById(req.params.id)
+      .populate('productId', 'name skuBase')
+      .populate('designId', 'name mode designCode')
       .populate('createdBy', 'name email');
 
-    if (!job) {
-      return res.status(404).json({ message: 'Printing job not found' });
+    if (!printingJob) {
+      return res.status(404).json({
+        message: 'Printing job not found',
+      });
     }
 
-    return res.status(200).json({ printingJob: job });
+    return res.json({ printingJob });
   } catch (err) {
-    console.error('Get printing job error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Get printing job error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+    });
   }
 };
 
 // PUT /api/printing-jobs/:id
+// Updates history only. It never moves stock.
 const updatePrintingJob = async (req, res) => {
   try {
-    const { id } = req.params;
+    const printingJob = await PrintingJob.findById(req.params.id);
 
-    console.log('updatePrintingJob called with id =', id);
-
-    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-      console.warn('updatePrintingJob invalid id:', id);
-      return res.status(400).json({ message: 'Invalid job id' });
+    if (!printingJob) {
+      return res.status(404).json({
+        message: 'Printing job not found',
+      });
     }
 
-    const allowed = ['status', 'notes'];
-    const update = {};
+    const { status, notes } = req.body;
 
-    for (const key of allowed) {
-      if (req.body[key] !== undefined) {
-        update[key] = req.body[key];
+    if (status !== undefined) {
+      if (!['PENDING', 'COMPLETED', 'CANCELLED'].includes(status)) {
+        return res.status(400).json({
+          message: 'Invalid status',
+        });
       }
+
+      printingJob.status = status;
     }
 
-    if (update.status) {
-      const validStatuses = ['PENDING', 'COMPLETED', 'CANCELLED'];
-      if (!validStatuses.includes(update.status)) {
-        return res.status(400).json({ message: 'Invalid status value' });
-      }
+    if (notes !== undefined) {
+      printingJob.notes = notes;
     }
 
-    if (update.notes && typeof update.notes === 'string') {
-      update.notes = update.notes.trim();
-    }
+    // Never add PRINTED stock here.
+    printingJob.inventoryAdded = false;
 
-    const job = await PrintingJob.findByIdAndUpdate(id, update, {
-      new: true,
+    await printingJob.save();
+
+    return res.json({
+      message: 'Printing job updated successfully',
+      printingJob,
     });
-
-    if (!job) {
-      return res.status(404).json({ message: 'Printing job not found' });
-    }
-
-    return res.status(200).json({ printingJob: job });
   } catch (err) {
-    console.error('Update printing job error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Update printing job error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+    });
   }
 };
 
 // DELETE /api/printing-jobs/:id
 const deletePrintingJob = async (req, res) => {
   try {
-    const { id } = req.params;
+    const printingJob = await PrintingJob.findById(req.params.id);
 
-    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid job id' });
+    if (!printingJob) {
+      return res.status(404).json({
+        message: 'Printing job not found',
+      });
     }
 
-    const job = await PrintingJob.findByIdAndDelete(id);
+    await printingJob.deleteOne();
 
-    if (!job) {
-      return res.status(404).json({ message: 'Printing job not found' });
-    }
-
-    return res
-      .status(200)
-      .json({ message: 'Printing job deleted successfully' });
+    return res.json({
+      message: 'Printing job deleted successfully',
+    });
   } catch (err) {
-    console.error('Delete printing job error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Delete printing job error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+    });
   }
 };
 
 // GET /api/printing-jobs/designs/:productId
 const getPrintedDesignsByProduct = async (req, res) => {
   try {
-    const { productId } = req.params;
+    const designs = await ProductDesign.find({
+      productId: req.params.productId,
+      isActive: true,
+    }).select('name mode designCode designUrl notes');
 
-    if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
-      return res.status(400).json({ message: 'Invalid product id' });
-    }
-
-    const product = await Product.findById(productId);
-    if (!product || !product.isActive) {
-      return res.status(404).json({ message: 'Product not found or inactive' });
-    }
-
-    const designs = await Inventory.find({
-      productId,
-      type: 'PRINTED',
-    }).select('designCode quantity minThreshold isActive');
-
-    return res.status(200).json({
-      productId,
-      productName: product.name,
-      designs,
-    });
+    return res.json({ designs });
   } catch (err) {
-    console.error('Get printed designs error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Get product designs error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+    });
   }
 };
 
