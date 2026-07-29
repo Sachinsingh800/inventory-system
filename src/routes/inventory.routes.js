@@ -1,55 +1,30 @@
+// routes/inventory.js
 const { Router } = require('express');
 const auth = require('../middlewares/auth.middleware');
-
 const {
   addDesignToRawInventory,
   transferRawToPrintedInventory,
   getDesignInventoryByProduct,
+  updateInventoryThreshold,
+  getLowStockInventory,            // <-- import
 } = require('../controllers/inventory.controller');
 
 const router = Router();
 
-// Add selected model/design to RAW inventory
-router.post(
-  '/raw/design',
-  auth(['ADMIN', 'PRINTER']),
-  addDesignToRawInventory
-);
+// POST routes
+router.post('/raw/design', auth(['ADMIN', 'PRINTER']), addDesignToRawInventory);
+router.post('/raw', auth(['ADMIN', 'PRINTER']), addDesignToRawInventory);
+router.post('/transfer-to-printed', auth(['ADMIN', 'PRINTER']), transferRawToPrintedInventory);
 
-// Optional compatibility route.
-// Frontend can use /api/inventory/raw with the same body.
-router.post(
-  '/raw',
-  auth(['ADMIN', 'PRINTER']),
-  addDesignToRawInventory
-);
+// PATCH route (threshold update)
+router.patch('/:id', auth(['ADMIN', 'PRINTER', 'PACKER']), updateInventoryThreshold);
 
-// Move selected model/design quantity from RAW to PRINTED
-router.post(
-  '/transfer-to-printed',
-  auth(['ADMIN', 'PRINTER']),
-  transferRawToPrintedInventory
-);
+// *** NEW: Low-stock report ***
+router.get('/low-stock', auth(['ADMIN', 'PRINTER', 'PACKER']), getLowStockInventory);
 
-// New design inventory endpoint
-router.get(
-  '/design/:productId',
-  auth(['ADMIN', 'PRINTER', 'PACKER']),
-  getDesignInventoryByProduct
-);
-
-// Compatibility with your old dashboard endpoint
-router.get(
-  '/with-barcodes/:productId',
-  auth(['ADMIN', 'PRINTER', 'PACKER']),
-  getDesignInventoryByProduct
-);
-
-// Compatibility with /api/inventory/:productId
-router.get(
-  '/:productId',
-  auth(['ADMIN', 'PRINTER', 'PACKER']),
-  getDesignInventoryByProduct
-);
+// GET routes (dynamic :productId must be last)
+router.get('/design/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), getDesignInventoryByProduct);
+router.get('/with-barcodes/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), getDesignInventoryByProduct);
+router.get('/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), getDesignInventoryByProduct);
 
 module.exports = router;

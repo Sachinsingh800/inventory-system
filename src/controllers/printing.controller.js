@@ -12,6 +12,7 @@ const createPrintingJob = async (req, res) => {
       quantity,
       status = 'PENDING',
       notes = '',
+      minThreshold,            // optional, from client
     } = req.body;
 
     if (!productId || !designId) {
@@ -30,6 +31,17 @@ const createPrintingJob = async (req, res) => {
       return res.status(400).json({
         message: 'Invalid status',
       });
+    }
+
+    // Validate and default minThreshold
+    let threshold = 0;
+    if (minThreshold !== undefined) {
+      threshold = Number(minThreshold);
+      if (isNaN(threshold) || threshold < 0) {
+        return res.status(400).json({
+          message: 'minThreshold must be a non-negative number',
+        });
+      }
     }
 
     const design = await ProductDesign.findOne({
@@ -57,12 +69,12 @@ const createPrintingJob = async (req, res) => {
         },
         $set: {
           isActive: true,
+          minThreshold: threshold,          // use the validated value
         },
         $setOnInsert: {
           productId,
           type: 'RAW',
           designCode: design.designCode,
-          minThreshold: 0,
           barcodes: [],
         },
       },
@@ -73,7 +85,7 @@ const createPrintingJob = async (req, res) => {
       }
     );
 
-    // Save history only. Do not add anything to PRINTED inventory here.
+    // Save history only.
     const printingJob = await PrintingJob.create({
       productId,
       designId,
@@ -82,6 +94,7 @@ const createPrintingJob = async (req, res) => {
       status,
       notes,
       inventoryAdded: false,
+      minThreshold: threshold,              // store for audit trail
       createdBy: req.user?._id || req.user?.id,
     });
 
@@ -154,7 +167,7 @@ const updatePrintingJob = async (req, res) => {
       });
     }
 
-    const { status, notes } = req.body;
+    const { status, notes, minThreshold } = req.body;
 
     if (status !== undefined) {
       if (!['PENDING', 'COMPLETED', 'CANCELLED'].includes(status)) {
@@ -162,12 +175,22 @@ const updatePrintingJob = async (req, res) => {
           message: 'Invalid status',
         });
       }
-
       printingJob.status = status;
     }
 
     if (notes !== undefined) {
       printingJob.notes = notes;
+    }
+
+    // Allow updating the threshold on the history record (optional)
+    if (minThreshold !== undefined) {
+      const threshold = Number(minThreshold);
+      if (isNaN(threshold) || threshold < 0) {
+        return res.status(400).json({
+          message: 'minThreshold must be a non-negative number',
+        });
+      }
+      printingJob.minThreshold = threshold;
     }
 
     // Never add PRINTED stock here.

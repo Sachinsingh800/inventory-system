@@ -261,8 +261,102 @@ const getDesignInventoryByProduct = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------
+// NEW: PATCH /api/inventory/:id – Update minThreshold
+// ---------------------------------------------------------------
+const updateInventoryThreshold = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { minThreshold } = req.body;
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid inventory ID' });
+    }
+
+    const threshold = Number(minThreshold);
+    if (minThreshold === undefined || isNaN(threshold) || threshold < 0) {
+      return res.status(400).json({ message: 'minThreshold must be a non-negative number' });
+    }
+
+    const updated = await Inventory.findByIdAndUpdate(
+      id,
+      { $set: { minThreshold: threshold } },
+      { new: true, runValidators: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: 'Inventory record not found' });
+    }
+
+    return res.json({ message: 'Threshold updated', inventory: updated });
+  } catch (err) {
+    console.error('Update inventory threshold error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const getLowStockInventory = async (req, res) => {
+  try {
+    const lowStockItems = await Inventory.aggregate([
+      {
+        $match: {
+          isActive: true,
+          minThreshold: { $gt: 0 },
+          $expr: { $lte: ['$quantity', '$minThreshold'] },
+        },
+      },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'productId',
+          foreignField: '_id',
+          as: 'product',
+        },
+      },
+      { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'productdesigns',
+          let: { code: '$designCode' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$designCode', '$$code'] } } },
+            // ✅ Include designUrl in the projection
+            { $project: { name: 1, mode: 1, designCode: 1, designUrl: 1 } },
+          ],
+          as: 'design',
+        },
+      },
+      { $unwind: { path: '$design', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 1,
+          productId: 1,
+          productName: '$product.name',
+          designCode: 1,
+          designName: '$design.name',
+          mode: '$design.mode',
+          designUrl: '$design.designUrl',   // ✅ add designUrl
+          quantity: 1,
+          minThreshold: 1,
+          deficit: { $subtract: ['$minThreshold', '$quantity'] },
+          type: 1,
+        },
+      },
+      { $sort: { deficit: -1 } },
+    ]);
+
+    return res.json({ lowStockItems });
+  } catch (err) {
+    console.error('Low-stock query error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 module.exports = {
   addDesignToRawInventory,
   transferRawToPrintedInventory,
   getDesignInventoryByProduct,
+  updateInventoryThreshold,    // ← add this
+  getLowStockInventory,   // <-- add this
 };
