@@ -7,6 +7,15 @@ const purchaseItemSchema = new mongoose.Schema(
       ref: 'Product',
       required: true,
     },
+    designId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ProductDesign',
+      required: true, // every item must have a design
+    },
+    designCode: {
+      type: String,
+      required: true, // denormalized for quick lookup
+    },
     orderedQty: {
       type: Number,
       required: true,
@@ -49,9 +58,8 @@ const purchaseOrderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['PENDING', 'CREATED', 'VERIFIED', 'PARTIAL'],
+      enum: ['PENDING', 'VERIFIED'],
       default: 'PENDING',
-      required: true,
     },
     textSummary: {
       type: String,
@@ -60,7 +68,6 @@ const purchaseOrderSchema = new mongoose.Schema(
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: false,
     },
   },
   { timestamps: true }
