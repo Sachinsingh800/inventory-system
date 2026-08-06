@@ -1,35 +1,36 @@
-const PrintingJob = require('../models/PrintingJob');
-const ProductDesign = require('../models/ProductDesign');
-const Inventory = require('../models/Inventory');
+const PrintingJob = require("../models/PrintingJob");
+const ProductDesign = require("../models/ProductDesign");
+const Inventory = require("../models/Inventory");
 
 // POST /api/printing-jobs
 // Adds selected model/design quantity to RAW inventory.
 const createPrintingJob = async (req, res) => {
   try {
     const {
+      categoryId,
       productId,
       designId,
       quantity,
-      status = 'PENDING',
-      notes = '',
-      minThreshold,            // optional, from client
+      status = "PENDING",
+      notes = "",
+      minThreshold, // optional, from client
     } = req.body;
 
-    if (!productId || !designId) {
+    if (!categoryId || !productId || !designId) {
       return res.status(400).json({
-        message: 'productId and designId are required',
+        message: "productId and designId are required",
       });
     }
 
     if (!quantity || Number(quantity) < 1) {
       return res.status(400).json({
-        message: 'quantity must be greater than 0',
+        message: "quantity must be greater than 0",
       });
     }
 
-    if (!['PENDING', 'COMPLETED', 'CANCELLED'].includes(status)) {
+    if (!["PENDING", "COMPLETED", "CANCELLED"].includes(status)) {
       return res.status(400).json({
-        message: 'Invalid status',
+        message: "Invalid status",
       });
     }
 
@@ -39,7 +40,7 @@ const createPrintingJob = async (req, res) => {
       threshold = Number(minThreshold);
       if (isNaN(threshold) || threshold < 0) {
         return res.status(400).json({
-          message: 'minThreshold must be a non-negative number',
+          message: "minThreshold must be a non-negative number",
         });
       }
     }
@@ -52,7 +53,7 @@ const createPrintingJob = async (req, res) => {
 
     if (!design) {
       return res.status(400).json({
-        message: 'Selected model/design is invalid for this product',
+        message: "Selected model/design is invalid for this product",
       });
     }
 
@@ -60,7 +61,7 @@ const createPrintingJob = async (req, res) => {
     const rawInventory = await Inventory.findOneAndUpdate(
       {
         productId,
-        type: 'RAW',
+        type: "RAW",
         designCode: design.designCode,
       },
       {
@@ -69,11 +70,11 @@ const createPrintingJob = async (req, res) => {
         },
         $set: {
           isActive: true,
-          minThreshold: threshold,          // use the validated value
+          minThreshold: threshold, // use the validated value
         },
         $setOnInsert: {
           productId,
-          type: 'RAW',
+          type: "RAW",
           designCode: design.designCode,
           barcodes: [],
         },
@@ -82,11 +83,12 @@ const createPrintingJob = async (req, res) => {
         new: true,
         upsert: true,
         runValidators: true,
-      }
+      },
     );
 
     // Save history only.
     const printingJob = await PrintingJob.create({
+      categoryId,
       productId,
       designId,
       designCode: design.designCode,
@@ -94,20 +96,20 @@ const createPrintingJob = async (req, res) => {
       status,
       notes,
       inventoryAdded: false,
-      minThreshold: threshold,              // store for audit trail
+      minThreshold: threshold, // store for audit trail
       createdBy: req.user?._id || req.user?.id,
     });
 
     return res.status(201).json({
-      message: 'Model/design quantity added to RAW inventory successfully',
+      message: "Model/design quantity added to RAW inventory successfully",
       printingJob,
       rawInventory,
     });
   } catch (err) {
-    console.error('Create printing job error:', err);
+    console.error("Create printing job error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -116,17 +118,21 @@ const createPrintingJob = async (req, res) => {
 const listPrintingJobs = async (req, res) => {
   try {
     const printingJobs = await PrintingJob.find()
-      .populate('productId', 'name skuBase')
-      .populate('designId', 'name mode designCode')
-      .populate('createdBy', 'name email')
+      .populate({
+        path: "productId",
+        select: "name skuBase categoryId",
+        populate: { path: "categoryId", select: "name" },
+      })
+      .populate("designId", "name mode designCode")
+      .populate("createdBy", "name email")
       .sort({ createdAt: -1 });
 
     return res.json({ printingJobs });
   } catch (err) {
-    console.error('List printing jobs error:', err);
+    console.error("List printing jobs error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -135,22 +141,26 @@ const listPrintingJobs = async (req, res) => {
 const getPrintingJobById = async (req, res) => {
   try {
     const printingJob = await PrintingJob.findById(req.params.id)
-      .populate('productId', 'name skuBase')
-      .populate('designId', 'name mode designCode')
-      .populate('createdBy', 'name email');
+      .populate({
+        path: "productId",
+        select: "name skuBase categoryId",
+        populate: { path: "categoryId", select: "name" },
+      })
+      .populate("designId", "name mode designCode")
+      .populate("createdBy", "name email");
 
     if (!printingJob) {
       return res.status(404).json({
-        message: 'Printing job not found',
+        message: "Printing job not found",
       });
     }
 
     return res.json({ printingJob });
   } catch (err) {
-    console.error('Get printing job error:', err);
+    console.error("Get printing job error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -163,16 +173,16 @@ const updatePrintingJob = async (req, res) => {
 
     if (!printingJob) {
       return res.status(404).json({
-        message: 'Printing job not found',
+        message: "Printing job not found",
       });
     }
 
     const { status, notes, minThreshold } = req.body;
 
     if (status !== undefined) {
-      if (!['PENDING', 'COMPLETED', 'CANCELLED'].includes(status)) {
+      if (!["PENDING", "COMPLETED", "CANCELLED"].includes(status)) {
         return res.status(400).json({
-          message: 'Invalid status',
+          message: "Invalid status",
         });
       }
       printingJob.status = status;
@@ -187,7 +197,7 @@ const updatePrintingJob = async (req, res) => {
       const threshold = Number(minThreshold);
       if (isNaN(threshold) || threshold < 0) {
         return res.status(400).json({
-          message: 'minThreshold must be a non-negative number',
+          message: "minThreshold must be a non-negative number",
         });
       }
       printingJob.minThreshold = threshold;
@@ -199,14 +209,14 @@ const updatePrintingJob = async (req, res) => {
     await printingJob.save();
 
     return res.json({
-      message: 'Printing job updated successfully',
+      message: "Printing job updated successfully",
       printingJob,
     });
   } catch (err) {
-    console.error('Update printing job error:', err);
+    console.error("Update printing job error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -218,20 +228,20 @@ const deletePrintingJob = async (req, res) => {
 
     if (!printingJob) {
       return res.status(404).json({
-        message: 'Printing job not found',
+        message: "Printing job not found",
       });
     }
 
     await printingJob.deleteOne();
 
     return res.json({
-      message: 'Printing job deleted successfully',
+      message: "Printing job deleted successfully",
     });
   } catch (err) {
-    console.error('Delete printing job error:', err);
+    console.error("Delete printing job error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -242,14 +252,14 @@ const getPrintedDesignsByProduct = async (req, res) => {
     const designs = await ProductDesign.find({
       productId: req.params.productId,
       isActive: true,
-    }).select('name mode designCode designUrl notes');
+    }).select("name mode designCode designUrl notes");
 
     return res.json({ designs });
   } catch (err) {
-    console.error('Get product designs error:', err);
+    console.error("Get product designs error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };

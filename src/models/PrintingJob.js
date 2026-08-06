@@ -1,15 +1,20 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const printingJobSchema = new mongoose.Schema(
   {
+    categoryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
+      required: true,
+    },
     productId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Product',
+      ref: "Product",
       required: true,
     },
     designId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'ProductDesign',
+      ref: "ProductDesign",
       required: true,
     },
     designCode: {
@@ -25,13 +30,13 @@ const printingJobSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['PENDING', 'COMPLETED', 'CANCELLED'],
-      default: 'PENDING',
+      enum: ["PENDING", "COMPLETED", "CANCELLED"],
+      default: "PENDING",
     },
     notes: {
       type: String,
       trim: true,
-      default: '',
+      default: "",
     },
     inventoryAdded: {
       type: Boolean,
@@ -44,10 +49,10 @@ const printingJobSchema = new mongoose.Schema(
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
-module.exports = mongoose.model('PrintingJob', printingJobSchema);
+module.exports = mongoose.model("PrintingJob", printingJobSchema);

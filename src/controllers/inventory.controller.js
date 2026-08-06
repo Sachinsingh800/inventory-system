@@ -1,3 +1,4 @@
+// src/controllers/inventoryController.js
 const mongoose = require('mongoose');
 
 const Inventory = require('../models/Inventory');
@@ -171,6 +172,7 @@ const transferRawToPrintedInventory = async (req, res) => {
 };
 
 // GET /api/inventory/design/:productId
+// Now includes designUrl from ProductDesign lookup
 const getDesignInventoryByProduct = async (req, res) => {
   try {
     const { productId } = req.params;
@@ -181,6 +183,7 @@ const getDesignInventoryByProduct = async (req, res) => {
       });
     }
 
+    // Fetch active inventory with a design code
     const inventory = await Inventory.find({
       productId,
       designCode: { $ne: null },
@@ -189,7 +192,7 @@ const getDesignInventoryByProduct = async (req, res) => {
       .sort({ type: 1, designCode: 1 })
       .lean();
 
-    // Barcode status comes from Barcode collection.
+    // Barcode stats per designCode
     const barcodeStats = await Barcode.aggregate([
       {
         $match: {
@@ -199,33 +202,18 @@ const getDesignInventoryByProduct = async (req, res) => {
       {
         $group: {
           _id: '$designCode',
-          totalBarcodes: {
-            $sum: 1,
-          },
+          totalBarcodes: { $sum: 1 },
           availableBarcodes: {
-            $sum: {
-              $cond: [
-                { $eq: ['$status', 'AVAILABLE'] },
-                1,
-                0,
-              ],
-            },
+            $sum: { $cond: [{ $eq: ['$status', 'AVAILABLE'] }, 1, 0] },
           },
           usedBarcodes: {
-            $sum: {
-              $cond: [
-                { $eq: ['$status', 'USED'] },
-                1,
-                0,
-              ],
-            },
+            $sum: { $cond: [{ $eq: ['$status', 'USED'] }, 1, 0] },
           },
         },
       },
     ]);
 
     const barcodeStatsByDesign = {};
-
     barcodeStats.forEach((item) => {
       barcodeStatsByDesign[item._id] = {
         totalBarcodes: item.totalBarcodes,
@@ -234,18 +222,37 @@ const getDesignInventoryByProduct = async (req, res) => {
       };
     });
 
+    // Gather all unique designCodes to fetch designUrls
+    const designCodes = [...new Set(inventory.map(row => row.designCode))];
+    const designs = await ProductDesign.find({
+      designCode: { $in: designCodes },
+      isActive: true,
+    })
+      .select('designCode designUrl name mode')
+      .lean();
+
+    const designMap = {};
+    designs.forEach(d => {
+      designMap[d.designCode] = d;
+    });
+
+    // Build detailed response
     const detailedInventory = inventory.map((row) => {
       const stats = barcodeStatsByDesign[row.designCode] || {
         totalBarcodes: 0,
         availableBarcodes: 0,
         usedBarcodes: 0,
       };
+      const design = designMap[row.designCode] || {};
 
       return {
         ...row,
         totalBarcodes: stats.totalBarcodes,
         availableBarcodes: stats.availableBarcodes,
         usedBarcodes: stats.usedBarcodes,
+        designName: design.name || null,
+        mode: design.mode || null,
+        designUrl: design.designUrl || '',   // 🆕 designUrl from ProductDesign
       };
     });
 
@@ -261,15 +268,12 @@ const getDesignInventoryByProduct = async (req, res) => {
   }
 };
 
-// ---------------------------------------------------------------
-// NEW: PATCH /api/inventory/:id – Update minThreshold
-// ---------------------------------------------------------------
+// PATCH /api/inventory/:id – Update minThreshold
 const updateInventoryThreshold = async (req, res) => {
   try {
     const { id } = req.params;
     const { minThreshold } = req.body;
 
-    // Validate ObjectId
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid inventory ID' });
     }
@@ -296,6 +300,8 @@ const updateInventoryThreshold = async (req, res) => {
   }
 };
 
+// GET /api/inventory/low-stock
+// Already includes designUrl in the $project (as shown in the original code)
 const getLowStockInventory = async (req, res) => {
   try {
     const lowStockItems = await Inventory.aggregate([
@@ -321,7 +327,6 @@ const getLowStockInventory = async (req, res) => {
           let: { code: '$designCode' },
           pipeline: [
             { $match: { $expr: { $eq: ['$designCode', '$$code'] } } },
-            // ✅ Include designUrl in the projection
             { $project: { name: 1, mode: 1, designCode: 1, designUrl: 1 } },
           ],
           as: 'design',
@@ -336,7 +341,7 @@ const getLowStockInventory = async (req, res) => {
           designCode: 1,
           designName: '$design.name',
           mode: '$design.mode',
-          designUrl: '$design.designUrl',   // ✅ add designUrl
+          designUrl: '$design.designUrl',   // ✅ designUrl already present
           quantity: 1,
           minThreshold: 1,
           deficit: { $subtract: ['$minThreshold', '$quantity'] },
@@ -357,6 +362,6 @@ module.exports = {
   addDesignToRawInventory,
   transferRawToPrintedInventory,
   getDesignInventoryByProduct,
-  updateInventoryThreshold,    // ← add this
-  getLowStockInventory,   // <-- add this
+  updateInventoryThreshold,
+  getLowStockInventory,
 };
