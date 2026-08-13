@@ -1,10 +1,48 @@
+const mongoose = require("mongoose");
 const PrintingJob = require("../models/PrintingJob");
 const ProductDesign = require("../models/ProductDesign");
-const Inventory = require("../models/Inventory");
+const { deductRawStock, addPrintedStock } = require("../services/inventory.service");
+
+const VALID_STATUSES = ["PENDING", "COMPLETED", "CANCELLED"];
+
+const isPositiveWholeNumber = (value) =>
+  Number.isSafeInteger(Number(value)) && Number(value) > 0;
+
+const isObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
+
+/**
+ * Move stock from the single product-level RAW row to one design-level
+ * PRINTED row. It must be called in a transaction.
+ */
+const applyCompletedJobInventory = async (printingJob, session) => {
+  const rawInventory = await deductRawStock(
+    printingJob.productId,
+    printingJob.quantity,
+    session,
+  );
+
+  if (!rawInventory) {
+    throw new Error("Insufficient RAW inventory for this printing job");
+  }
+
+  const printedInventory = await addPrintedStock(
+    printingJob.productId,
+    printingJob.designCode,
+    printingJob.quantity,
+    session,
+  );
+
+  printingJob.inventoryAdded = true;
+  await printingJob.save({ session });
+
+  return { rawInventory, printedInventory };
+};
 
 // POST /api/printing-jobs
-// Adds selected model/design quantity to RAW inventory.
+// PENDING jobs are history only. A job created as COMPLETED is transferred
+// immediately from RAW to PRINTED in the same transaction.
 const createPrintingJob = async (req, res) => {
+  let session;
   try {
     const {
       categoryId,
@@ -13,34 +51,29 @@ const createPrintingJob = async (req, res) => {
       quantity,
       status = "PENDING",
       notes = "",
-      minThreshold, // optional, from client
+      minThreshold,
     } = req.body;
 
-    if (!categoryId || !productId || !designId) {
+    if (!isObjectId(categoryId) || !isObjectId(productId) || !isObjectId(designId)) {
       return res.status(400).json({
-        message: "productId and designId are required",
+        message: "Valid categoryId, productId and designId are required",
       });
     }
-
-    if (!quantity || Number(quantity) < 1) {
+    if (!isPositiveWholeNumber(quantity)) {
       return res.status(400).json({
-        message: "quantity must be greater than 0",
+        message: "quantity must be a positive whole number",
       });
     }
-
-    if (!["PENDING", "COMPLETED", "CANCELLED"].includes(status)) {
-      return res.status(400).json({
-        message: "Invalid status",
-      });
+    if (!VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
     }
 
-    // Validate and default minThreshold
     let threshold = 0;
     if (minThreshold !== undefined) {
       threshold = Number(minThreshold);
-      if (isNaN(threshold) || threshold < 0) {
+      if (!Number.isSafeInteger(threshold) || threshold < 0) {
         return res.status(400).json({
-          message: "minThreshold must be a non-negative number",
+          message: "minThreshold must be a non-negative whole number",
         });
       }
     }
@@ -49,7 +82,9 @@ const createPrintingJob = async (req, res) => {
       _id: designId,
       productId,
       isActive: true,
-    });
+    })
+      .select("designCode")
+      .lean();
 
     if (!design) {
       return res.status(400).json({
@@ -57,60 +92,50 @@ const createPrintingJob = async (req, res) => {
       });
     }
 
-    // Add to RAW inventory only.
-    const rawInventory = await Inventory.findOneAndUpdate(
-      {
-        productId,
-        type: "RAW",
-        designCode: design.designCode,
-      },
-      {
-        $inc: {
-          quantity: Number(quantity),
-        },
-        $set: {
-          isActive: true,
-          minThreshold: threshold, // use the validated value
-        },
-        $setOnInsert: {
-          productId,
-          type: "RAW",
-          designCode: design.designCode,
-          barcodes: [],
-        },
-      },
-      {
-        new: true,
-        upsert: true,
-        runValidators: true,
-      },
-    );
+    session = await mongoose.startSession();
+    let printingJob;
+    let inventory = null;
 
-    // Save history only.
-    const printingJob = await PrintingJob.create({
-      categoryId,
-      productId,
-      designId,
-      designCode: design.designCode,
-      quantity: Number(quantity),
-      status,
-      notes,
-      inventoryAdded: false,
-      minThreshold: threshold, // store for audit trail
-      createdBy: req.user?._id || req.user?.id,
+    await session.withTransaction(async () => {
+      [printingJob] = await PrintingJob.create(
+        [
+          {
+            categoryId,
+            productId,
+            designId,
+            designCode: design.designCode,
+            quantity: Number(quantity),
+            status,
+            notes,
+            inventoryAdded: false,
+            minThreshold: threshold,
+            createdBy: req.user?.id,
+          },
+        ],
+        { session },
+      );
+
+      if (status === "COMPLETED") {
+        inventory = await applyCompletedJobInventory(printingJob, session);
+      }
     });
 
     return res.status(201).json({
-      message: "Model/design quantity added to RAW inventory successfully",
+      message:
+        status === "COMPLETED"
+          ? "Printing completed: RAW stock deducted and PRINTED stock added"
+          : "Printing job created successfully",
       printingJob,
-      rawInventory,
+      inventory,
     });
   } catch (err) {
+    if (err.message === "Insufficient RAW inventory for this printing job") {
+      return res.status(400).json({ message: err.message });
+    }
     console.error("Create printing job error:", err);
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    return res.status(500).json({ message: "Server error" });
+  } finally {
+    if (session) await session.endSession();
   }
 };
 
@@ -130,10 +155,7 @@ const listPrintingJobs = async (req, res) => {
     return res.json({ printingJobs });
   } catch (err) {
     console.error("List printing jobs error:", err);
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -150,99 +172,108 @@ const getPrintingJobById = async (req, res) => {
       .populate("createdBy", "name email");
 
     if (!printingJob) {
-      return res.status(404).json({
-        message: "Printing job not found",
-      });
+      return res.status(404).json({ message: "Printing job not found" });
     }
-
     return res.json({ printingJob });
   } catch (err) {
     console.error("Get printing job error:", err);
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
 // PUT /api/printing-jobs/:id
-// Updates history only. It never moves stock.
+// A PENDING job moves inventory only once when it becomes COMPLETED.
 const updatePrintingJob = async (req, res) => {
+  let session;
   try {
-    const printingJob = await PrintingJob.findById(req.params.id);
-
-    if (!printingJob) {
-      return res.status(404).json({
-        message: "Printing job not found",
-      });
-    }
-
     const { status, notes, minThreshold } = req.body;
+    if (status !== undefined && !VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
 
-    if (status !== undefined) {
-      if (!["PENDING", "COMPLETED", "CANCELLED"].includes(status)) {
-        return res.status(400).json({
-          message: "Invalid status",
-        });
+    session = await mongoose.startSession();
+    let printingJob;
+    let inventory = null;
+
+    await session.withTransaction(async () => {
+      printingJob = await PrintingJob.findById(req.params.id).session(session);
+      if (!printingJob) throw new Error("Printing job not found");
+
+      // Once stock has moved, do not permit a status change that would make
+      // the job history disagree with real inventory.
+      if (
+        printingJob.inventoryAdded &&
+        status !== undefined &&
+        status !== "COMPLETED"
+      ) {
+        throw new Error("A completed printing job cannot be changed or cancelled");
       }
-      printingJob.status = status;
-    }
 
-    if (notes !== undefined) {
-      printingJob.notes = notes;
-    }
+      if (notes !== undefined) printingJob.notes = notes;
 
-    // Allow updating the threshold on the history record (optional)
-    if (minThreshold !== undefined) {
-      const threshold = Number(minThreshold);
-      if (isNaN(threshold) || threshold < 0) {
-        return res.status(400).json({
-          message: "minThreshold must be a non-negative number",
-        });
+      if (minThreshold !== undefined) {
+        const threshold = Number(minThreshold);
+        if (!Number.isSafeInteger(threshold) || threshold < 0) {
+          throw new Error("minThreshold must be a non-negative whole number");
+        }
+        printingJob.minThreshold = threshold;
       }
-      printingJob.minThreshold = threshold;
-    }
 
-    // Never add PRINTED stock here.
-    printingJob.inventoryAdded = false;
-
-    await printingJob.save();
+      if (status === "COMPLETED" && !printingJob.inventoryAdded) {
+        printingJob.status = "COMPLETED";
+        inventory = await applyCompletedJobInventory(printingJob, session);
+      } else if (status !== undefined) {
+        printingJob.status = status;
+        await printingJob.save({ session });
+      } else {
+        await printingJob.save({ session });
+      }
+    });
 
     return res.json({
-      message: "Printing job updated successfully",
+      message: inventory
+        ? "Printing completed: RAW stock deducted and PRINTED stock added"
+        : "Printing job updated successfully",
       printingJob,
+      inventory,
     });
   } catch (err) {
+    if (
+      err.message === "Printing job not found" ||
+      err.message === "Insufficient RAW inventory for this printing job" ||
+      err.message.includes("cannot be changed") ||
+      err.message.includes("minThreshold")
+    ) {
+      return res.status(err.message === "Printing job not found" ? 404 : 400).json({
+        message: err.message,
+      });
+    }
     console.error("Update printing job error:", err);
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    return res.status(500).json({ message: "Server error" });
+  } finally {
+    if (session) await session.endSession();
   }
 };
 
 // DELETE /api/printing-jobs/:id
+// Do not delete an inventory-applied job; it is an audit record for the move.
 const deletePrintingJob = async (req, res) => {
   try {
     const printingJob = await PrintingJob.findById(req.params.id);
-
     if (!printingJob) {
-      return res.status(404).json({
-        message: "Printing job not found",
+      return res.status(404).json({ message: "Printing job not found" });
+    }
+    if (printingJob.inventoryAdded) {
+      return res.status(400).json({
+        message: "Completed printing jobs cannot be deleted because inventory was moved",
       });
     }
 
     await printingJob.deleteOne();
-
-    return res.json({
-      message: "Printing job deleted successfully",
-    });
+    return res.json({ message: "Printing job deleted successfully" });
   } catch (err) {
     console.error("Delete printing job error:", err);
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -257,10 +288,7 @@ const getPrintedDesignsByProduct = async (req, res) => {
     return res.json({ designs });
   } catch (err) {
     console.error("Get product designs error:", err);
-
-    return res.status(500).json({
-      message: "Server error",
-    });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 

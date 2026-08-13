@@ -5,6 +5,55 @@ const Inventory = require('../models/Inventory');
 const ProductDesign = require('../models/ProductDesign');
 const Barcode = require('../models/Barcode');
 
+
+// POST /api/inventory/raw
+// body: { productId, quantity, minThreshold? }
+// RAW stock is held once per product/model, never per design.
+const addRawInventory = async (req, res) => {
+  try {
+    const { productId, quantity, minThreshold } = req.body;
+
+    if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(400).json({ message: 'A valid productId is required' });
+    }
+
+    const stockQuantity = Number(quantity);
+    if (!Number.isSafeInteger(stockQuantity) || stockQuantity < 1) {
+      return res.status(400).json({ message: 'quantity must be a positive whole number' });
+    }
+
+    const update = {
+      $inc: { quantity: stockQuantity },
+      $set: { isActive: true },
+      $setOnInsert: {
+        productId,
+        type: 'RAW',
+        designCode: null,
+        minThreshold: 0,
+        barcodes: [],
+      },
+    };
+
+    if (minThreshold !== undefined) {
+      const threshold = Number(minThreshold);
+      if (!Number.isSafeInteger(threshold) || threshold < 0) {
+        return res.status(400).json({ message: 'minThreshold must be a non-negative whole number' });
+      }
+      update.$set.minThreshold = threshold;
+    }
+
+    const inventory = await Inventory.findOneAndUpdate(
+      { productId, type: 'RAW', designCode: null },
+      update,
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    return res.status(201).json({ message: 'RAW stock added successfully', inventory });
+  } catch (err) {
+    console.error('Add RAW inventory error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
 // POST /api/inventory/raw/design
 // body: { productId, designId, quantity, minThreshold? }
 const addDesignToRawInventory = async (req, res) => {
@@ -182,11 +231,10 @@ const getDesignInventoryByProduct = async (req, res) => {
         message: 'Invalid product ID',
       });
     }
-
-    // Fetch active inventory with a design code
+    // Include the model-level RAW row (designCode: null) and every
+    // design-level PRINTED row so the dashboard receives both stock types.
     const inventory = await Inventory.find({
       productId,
-      designCode: { $ne: null },
       isActive: true,
     })
       .sort({ type: 1, designCode: 1 })
@@ -223,8 +271,9 @@ const getDesignInventoryByProduct = async (req, res) => {
     });
 
     // Gather all unique designCodes to fetch designUrls
-    const designCodes = [...new Set(inventory.map(row => row.designCode))];
+    const designCodes = [...new Set(inventory.filter((row) => row.designCode).map((row) => row.designCode))];
     const designs = await ProductDesign.find({
+      productId,
       designCode: { $in: designCodes },
       isActive: true,
     })
@@ -359,6 +408,7 @@ const getLowStockInventory = async (req, res) => {
 };
 
 module.exports = {
+  addRawInventory,
   addDesignToRawInventory,
   transferRawToPrintedInventory,
   getDesignInventoryByProduct,

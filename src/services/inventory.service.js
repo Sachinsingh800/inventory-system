@@ -1,75 +1,127 @@
 const Inventory = require('../models/Inventory');
 
-// Get or create RAW inventory record for a product
-const getOrCreateRawInventory = async (productId) => {
-  let inv = await Inventory.findOne({ productId, type: 'RAW', designCode: null });
+const rawFilter = (productId) => ({
+  productId,
+  type: 'RAW',
+  designCode: null,
+});
 
-  if (!inv) {
-    inv = await Inventory.create({
-      productId,
-      type: 'RAW',
-      designCode: null,
-      quantity: 0,
-      minThreshold: 0,
-    });
+const printedFilter = (productId, designCode) => ({
+  productId,
+  type: 'PRINTED',
+  designCode,
+});
+
+const updateOptions = (session) => ({
+  new: true,
+  upsert: true,
+  runValidators: true,
+  ...(session ? { session } : {}),
+});
+
+/**
+ * Add stock to the single RAW inventory row for this product/model.
+ */
+const addRawStock = (productId, quantity, minThreshold, session) => {
+  const update = {
+    $inc: { quantity },
+    $set: { isActive: true },
+    $setOnInsert: {
+      ...rawFilter(productId),
+      minThreshold: minThreshold ?? 0,
+    },
+  };
+
+  // Do not overwrite an existing threshold unless the caller explicitly asks.
+  if (minThreshold !== undefined) {
+    update.$set.minThreshold = minThreshold;
   }
 
-  return inv;
+  return Inventory.findOneAndUpdate(rawFilter(productId), update, updateOptions(session));
 };
 
-// Increment RAW stock (used in purchase verification)
-const addRawStock = async (productId, qty) => {
-  const inv = await getOrCreateRawInventory(productId);
+/**
+ * Deduct RAW stock only when enough is available. `null` means insufficient.
+ */
+const deductRawStock = (productId, quantity, session) =>
+  Inventory.findOneAndUpdate(
+    { ...rawFilter(productId), quantity: { $gte: quantity } },
+    { $inc: { quantity: -quantity } },
+    { new: true, ...(session ? { session } : {}) }
+  );
 
-  inv.quantity += qty;
-  await inv.save();
+/**
+ * Add stock to one PRINTED inventory row for this product/model + design.
+ */
+const addPrintedStock = (productId, designCode, quantity, session) =>
+  Inventory.findOneAndUpdate(
+    printedFilter(productId, designCode),
+    {
+      $inc: { quantity },
+      $set: { isActive: true },
+      $setOnInsert: {
+        ...printedFilter(productId, designCode),
+        minThreshold: 0,
+      },
+    },
+    updateOptions(session)
+  );
 
-  return inv;
-};
+/**
+ * Deduct PRINTED stock only. Barcode scans must call this, never deductRawStock.
+ */
+const deductPrintedStock = (productId, designCode, quantity, session) =>
+  Inventory.findOneAndUpdate(
+    { ...printedFilter(productId, designCode), quantity: { $gte: quantity } },
+    { $inc: { quantity: -quantity } },
+    { new: true, ...(session ? { session } : {}) }
+  );
 
-// Deduct RAW stock (used in printing job)
-const deductRawStock = async (productId, qty) => {
-  const inv = await getOrCreateRawInventory(productId);
+/**
+ * Reserve active barcode labels. The conditional update makes this safe even
+ * when two staff members generate labels at the same time.
+ */
+const reserveBarcodeLabels = (productId, designCode, quantity, session) =>
+  Inventory.findOneAndUpdate(
+    {
+      ...printedFilter(productId, designCode),
+      $expr: {
+        $gte: [
+          {
+            $subtract: [
+              '$quantity',
+              { $ifNull: ['$activeBarcodeCount', 0] },
+            ],
+          },
+          quantity,
+        ],
+      },
+    },
+    { $inc: { activeBarcodeCount: quantity } },
+    { new: true, ...(session ? { session } : {}) }
+  );
 
-  if (inv.quantity < qty) {
-    throw new Error('Insufficient raw stock');
-  }
-
-  inv.quantity -= qty;
-  await inv.save();
-
-  return inv;
-};
-
-// Get or create PRINTED inventory for product+design
-const getOrCreatePrintedInventory = async (productId, designCode) => {
-  let inv = await Inventory.findOne({ productId, type: 'PRINTED', designCode });
-
-  if (!inv) {
-    inv = await Inventory.create({
-      productId,
-      type: 'PRINTED',
-      designCode,
-      quantity: 0,
-      minThreshold: 0,
-    });
-  }
-
-  return inv;
-};
-
-// Increment PRINTED stock (used after printing job)
-const addPrintedStock = async (productId, designCode, qty) => {
-  const inv = await getOrCreatePrintedInventory(productId, designCode);
-  inv.quantity += qty;
-  await inv.save();
-  return inv;
-};
+/**
+ * A barcode scan consumes one label and one matching PRINTED item together.
+ */
+const deductPrintedStockForBarcode = (productId, designCode, quantity, session) =>
+  Inventory.findOneAndUpdate(
+    {
+      ...printedFilter(productId, designCode),
+      quantity: { $gte: quantity },
+      $expr: { $gte: [{ $ifNull: ['$activeBarcodeCount', 0] }, quantity] },
+    },
+    { $inc: { quantity: -quantity, activeBarcodeCount: -quantity } },
+    { new: true, ...(session ? { session } : {}) }
+  );
 
 module.exports = {
-  getOrCreateRawInventory,
   addRawStock,
   deductRawStock,
-  getOrCreatePrintedInventory,
   addPrintedStock,
+  deductPrintedStock,
+  reserveBarcodeLabels,
+  deductPrintedStockForBarcode,
+  rawFilter,
+  printedFilter,
 };

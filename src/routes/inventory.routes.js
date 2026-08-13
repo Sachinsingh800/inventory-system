@@ -1,28 +1,29 @@
-// routes/inventory.js
 const { Router } = require('express');
 const auth = require('../middlewares/auth.middleware');
 const {
-  addDesignToRawInventory,
+  addRawInventory,
   transferRawToPrintedInventory,
   getDesignInventoryByProduct,
   updateInventoryThreshold,
-  getLowStockInventory,            // <-- import
+  getLowStockInventory,
 } = require('../controllers/inventory.controller');
 
 const router = Router();
 
-// POST routes
-router.post('/raw/design', auth(['ADMIN', 'PRINTER']), addDesignToRawInventory);
-router.post('/raw', auth(['ADMIN', 'PRINTER']), addDesignToRawInventory);
-router.post('/transfer-to-printed', auth(['ADMIN', 'PRINTER']), transferRawToPrintedInventory);
+// RAW is stock for a phone model only, never for an individual design.
+router.post('/raw', auth(['ADMIN', 'PRINTER']), addRawInventory);
 
-// PATCH route (threshold update)
+// Moves one or more quantities from RAW model stock to PRINTED design stock.
+router.post(
+  '/transfer-to-printed',
+  auth(['ADMIN', 'PRINTER']),
+  transferRawToPrintedInventory
+);
+
+router.get('/low-stock', auth(['ADMIN', 'PRINTER', 'PACKER']), getLowStockInventory);
 router.patch('/:id', auth(['ADMIN', 'PRINTER', 'PACKER']), updateInventoryThreshold);
 
-// *** NEW: Low-stock report ***
-router.get('/low-stock', auth(['ADMIN', 'PRINTER', 'PACKER']), getLowStockInventory);
-
-// GET routes (dynamic :productId must be last)
+// Keep these aliases if the existing frontend already calls them.
 router.get('/design/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), getDesignInventoryByProduct);
 router.get('/with-barcodes/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), getDesignInventoryByProduct);
 router.get('/:productId', auth(['ADMIN', 'PRINTER', 'PACKER']), getDesignInventoryByProduct);

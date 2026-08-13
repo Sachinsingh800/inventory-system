@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const Barcode = require('../models/Barcode');
 const Inventory = require('../models/Inventory');
 const Product = require('../models/Product');
@@ -10,31 +11,109 @@ const makeBarcodeCode = (designCode) => {
 };
 
 const generateBarcodes = async (req, res) => {
+  let session;
   try {
-    const { productId, designId, quantity } = req.body;
-    const count = Number(quantity);
-    if (!productId || !designId) return res.status(400).json({ message: 'productId and designId are required' });
-    if (!Number.isInteger(count) || count < 1) return res.status(400).json({ message: 'quantity must be a whole number greater than 0' });
-    const design = await ProductDesign.findOne({ _id: designId, productId, isActive: true });
-    if (!design) return res.status(400).json({ message: 'Selected model/design does not belong to this product' });
-    const raw = await Inventory.findOneAndUpdate({ productId, type: 'RAW', designCode: design.designCode, quantity: { $gte: count } }, { $inc: { quantity: -count } }, { new: true });
-    if (!raw) return res.status(400).json({ message: `Insufficient RAW stock for design: ${design.designCode}` });
-    let barcodes;
-    try {
-      barcodes = await Barcode.insertMany(Array.from({ length: count }, () => ({ code: makeBarcodeCode(design.designCode), productId, designCode: design.designCode, status: 'AVAILABLE' })));
-    } catch (error) {
-      await Inventory.updateOne({ productId, type: 'RAW', designCode: design.designCode }, { $inc: { quantity: count } });
-      throw error;
+    const { productId, designId } = req.body;
+    if (!productId || !designId) {
+      return res.status(400).json({ message: 'productId and designId are required' });
     }
-    const codes = barcodes.map((barcode) => barcode.code);
-    const printed = await Inventory.findOneAndUpdate({ productId, type: 'PRINTED', designCode: design.designCode }, { $inc: { quantity: count }, $push: { barcodes: { $each: codes } }, $set: { isActive: true }, $setOnInsert: { productId, type: 'PRINTED', designCode: design.designCode, minThreshold: 0 } }, { new: true, upsert: true, runValidators: true });
-    res.status(201).json({ message: 'Barcodes generated and stock moved from RAW to PRINTED', design: { id: design._id, name: design.name, mode: design.mode, designCode: design.designCode }, rawInventory: { id: raw._id, quantity: raw.quantity }, printedInventory: { id: printed._id, quantity: printed.quantity }, barcodeCount: barcodes.length, barcodes });
+
+    const design = await ProductDesign.findOne({
+      _id: designId,
+      productId,
+      isActive: true,
+    }).lean();
+    if (!design) {
+      return res.status(400).json({
+        message: 'Selected model/design does not belong to this product',
+      });
+    }
+
+    session = await mongoose.startSession();
+    let barcodes;
+    let printedInventory;
+
+    await session.withTransaction(async () => {
+      // Printing jobs already move stock from RAW to PRINTED. Barcode creation
+      // only labels the remaining unlabelled PRINTED units; it never moves stock.
+      printedInventory = await Inventory.findOne({
+        productId,
+        type: 'PRINTED',
+        designCode: design.designCode,
+        isActive: true,
+      }).session(session);
+
+      if (!printedInventory || printedInventory.quantity < 1) {
+        throw new Error('No PRINTED stock exists for this design');
+      }
+
+      const availableCount = await Barcode.countDocuments({
+        productId,
+        designCode: design.designCode,
+        status: 'AVAILABLE',
+      }).session(session);
+      const count = printedInventory.quantity - availableCount;
+
+      if (count < 1) {
+        throw new Error('All current PRINTED stock for this design already has barcodes');
+      }
+
+      barcodes = await Barcode.insertMany(
+        Array.from({ length: count }, () => ({
+          code: makeBarcodeCode(design.designCode),
+          productId,
+          designCode: design.designCode,
+          status: 'AVAILABLE',
+        })),
+        { session, ordered: true },
+      );
+
+      // Keep the inventory label counter accurate for the barcode scan flow.
+      // `availableCount` also supports barcode records created before this change.
+      printedInventory = await Inventory.findOneAndUpdate(
+        { _id: printedInventory._id, quantity: printedInventory.quantity },
+        { $set: { activeBarcodeCount: availableCount + count } },
+        { new: true, session },
+      );
+      if (!printedInventory) {
+        throw new Error('PRINTED inventory changed; please generate barcodes again');
+      }
+    });
+
+    return res.status(201).json({
+      message: `${barcodes.length} barcode(s) generated from PRINTED stock`,
+      design: {
+        id: design._id,
+        name: design.name,
+        mode: design.mode,
+        designCode: design.designCode,
+      },
+      printedInventory: {
+        id: printedInventory._id,
+        quantity: printedInventory.quantity,
+      },
+      barcodeCount: barcodes.length,
+      barcodes,
+    });
   } catch (error) {
+    if (
+      error.message.includes('PRINTED stock') ||
+      error.message.includes('already has barcodes') ||
+      error.message.includes('PRINTED inventory changed')
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
     console.error('Generate barcodes error:', error);
-    res.status(error.code === 11000 ? 409 : 500).json({ message: error.code === 11000 ? 'A duplicate barcode was generated. Please try again.' : 'Server error' });
+    return res.status(error.code === 11000 ? 409 : 500).json({
+      message:
+        error.code === 11000
+          ? 'A duplicate barcode was generated. Please try again.'
+          : 'Server error',
+    });
+  } finally {
+    if (session) await session.endSession();
   }
 };
-
 const listBarcodesByProduct = async (req, res) => {
   try {
     const filter = { productId: req.params.productId };
