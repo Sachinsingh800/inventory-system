@@ -19,7 +19,9 @@ router.get('/inventory-products', auth(['ADMIN']), async (req, res) => {
           designCode: 1,
         });
 
-        const rawDoc = inventoryDocs.find((i) => i.type === 'RAW');
+        const rawDoc = inventoryDocs.find(
+          (i) => i.type === 'RAW' && i.designCode === null
+        );
         const printedDocs = inventoryDocs.filter((i) => i.type === 'PRINTED');
 
         const rawQuantity = rawDoc?.quantity ?? 0;

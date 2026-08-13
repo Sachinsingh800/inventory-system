@@ -1,20 +1,65 @@
 const mongoose = require('mongoose');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Product = require('../models/Product');
-const ProductDesign = require('../models/ProductDesign');
-const Inventory = require('../models/Inventory');
+const { addRawStock } = require('../services/inventory.service');
 
-// ---------- Helper: build text summary ----------
-const buildTextSummary = async (items) => {
-  const parts = [];
+const isPositiveWholeNumber = (value) =>
+  Number.isSafeInteger(Number(value)) && Number(value) > 0;
+
+const isNonNegativeWholeNumber = (value) =>
+  Number.isSafeInteger(Number(value)) && Number(value) >= 0;
+
+/**
+ * Purchase orders are product-only. Repeated selections of the same product
+ * are combined into a single line so verification has one quantity per model.
+ */
+const normalizeOrderItems = (items) => {
+  const quantitiesByProduct = new Map();
+
   for (const item of items) {
-    const product = await Product.findById(item.productId).select('name');
-    const design = await ProductDesign.findById(item.designId).select('name designCode');
-    const pName = product ? product.name : 'Unknown Product';
-    const dName = design ? `${design.name} (${design.designCode})` : 'Unknown Design';
-    parts.push(`${pName} - ${dName} - ${item.orderedQty}pcs`);
+    if (!item.productId || !mongoose.Types.ObjectId.isValid(item.productId)) {
+      throw new Error('Each item must have a valid productId');
+    }
+    if (!isPositiveWholeNumber(item.orderedQty)) {
+      throw new Error('orderedQty must be a positive whole number for each item');
+    }
+
+    const productId = String(item.productId);
+    quantitiesByProduct.set(
+      productId,
+      (quantitiesByProduct.get(productId) || 0) + Number(item.orderedQty)
+    );
   }
-  return parts.join(', ');
+
+  return [...quantitiesByProduct.entries()].map(([productId, orderedQty]) => ({
+    productId,
+    orderedQty,
+  }));
+};
+
+const buildTextSummary = (items, productsById) =>
+  items
+    .map((item) => {
+      const product = productsById.get(String(item.productId));
+      return `${product?.name || 'Unknown Product'} - ${item.orderedQty}pcs`;
+    })
+    .join(', ');
+
+// Old pending purchase orders may still have several design rows for one
+// product. This records one product-level received quantity without losing the
+// total shown in their historical line items.
+const distributeReceivedQuantity = (orderItems, receivedQty) => {
+  let remaining = receivedQty;
+
+  for (const orderItem of orderItems) {
+    const appliedQty = Math.min(Number(orderItem.orderedQty), remaining);
+    orderItem.receivedQty = appliedQty;
+    remaining -= appliedQty;
+  }
+
+  if (remaining > 0 && orderItems[0]) {
+    orderItems[0].receivedQty += remaining;
+  }
 };
 
 // ---------- CREATE ----------
@@ -30,47 +75,45 @@ const createPurchaseOrder = async (req, res) => {
       return res.status(400).json({ message: 'Items array is required' });
     }
 
-    for (const item of items) {
-      if (!item.productId || !item.designId || !item.designCode) {
-        return res.status(400).json({
-          message: 'Each item must have productId, designId, designCode, and orderedQty',
-        });
-      }
-      if (!item.orderedQty || item.orderedQty <= 0) {
-        return res.status(400).json({
-          message: 'orderedQty must be > 0 for each item',
-        });
-      }
-      const design = await ProductDesign.findOne({
-        _id: item.designId,
-        productId: item.productId,
-        isActive: true,
-      });
-      if (!design) {
-        return res.status(400).json({
-          message: `Design ${item.designId} is not valid for product ${item.productId}`,
-        });
-      }
+    let normalizedItems;
+    try {
+      normalizedItems = normalizeOrderItems(items);
+    } catch (error) {
+      return res.status(400).json({ message: error.message });
     }
 
-    const textSummary = await buildTextSummary(items);
+    const productIds = normalizedItems.map((item) => item.productId);
+    const products = await Product.find({
+      _id: { $in: productIds },
+      isActive: true,
+    }).select('name');
+    const productsById = new Map(
+      products.map((product) => [String(product._id), product])
+    );
+
+    if (productsById.size !== productIds.length) {
+      return res.status(400).json({
+        message: 'One or more selected products are not active',
+      });
+    }
+
     const po = await PurchaseOrder.create({
       supplierName: supplierName.trim(),
       notes: notes ? String(notes).trim() : '',
       purchaseDate: purchaseDate ? new Date(purchaseDate) : new Date(),
-      items,
+      items: normalizedItems,
       status: 'PENDING',
-      textSummary,
+      textSummary: buildTextSummary(normalizedItems, productsById),
       createdBy: userId || undefined,
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       message: 'Purchase order created successfully',
       purchaseOrder: po,
     });
   } catch (err) {
     console.error('Create purchase order error', err);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -78,11 +121,11 @@ const createPurchaseOrder = async (req, res) => {
 const verifyPurchaseOrder = async (req, res) => {
   try {
     const { id } = req.params;
-    const { items } = req.body; // [{ productId, designCode, receivedQty }]
+    const { items } = req.body; // [{ productId, receivedQty }]
 
-    console.log('🔍 Verification started for PO:', id);
-    console.log('📦 Received items:', JSON.stringify(items, null, 2));
-
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid purchase order ID' });
+    }
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Items array is required' });
     }
@@ -95,105 +138,71 @@ const verifyPurchaseOrder = async (req, res) => {
       return res.status(400).json({ message: 'Order is already verified' });
     }
 
-    // Build map (productId + designCode) -> receivedQty
-    const receivedMap = new Map();
+    const receivedByProduct = new Map();
     for (const item of items) {
-      if (!item.productId || item.receivedQty == null || item.receivedQty < 0) {
+      if (
+        !item.productId ||
+        !mongoose.Types.ObjectId.isValid(item.productId) ||
+        !isNonNegativeWholeNumber(item.receivedQty)
+      ) {
         return res.status(400).json({
-          message: 'Each item must have productId and receivedQty >= 0',
+          message: 'Each item must have a valid productId and a whole receivedQty of 0 or more',
         });
       }
-      if (!item.designCode) {
-        return res.status(400).json({ message: 'Each item must have designCode' });
+
+      const productId = String(item.productId);
+      if (receivedByProduct.has(productId)) {
+        return res.status(400).json({
+          message: 'Each product can appear only once when verifying',
+        });
       }
-      const key = `${String(item.productId)}|${String(item.designCode).trim().toUpperCase()}`;
-      receivedMap.set(key, Number(item.receivedQty));
+      receivedByProduct.set(productId, Number(item.receivedQty));
     }
 
-    console.log('🗺️ Received map:', Array.from(receivedMap.entries()));
-
-    const affectedProductIds = new Set();
-
-    // Process each order item
+    const orderItemsByProduct = new Map();
     for (const orderItem of po.items) {
-      const orderDesignCode = String(orderItem.designCode).trim().toUpperCase();
-      const key = `${String(orderItem.productId)}|${orderDesignCode}`;
-      const receivedQty = receivedMap.get(key) || 0;
+      const productId = String(orderItem.productId);
+      const productItems = orderItemsByProduct.get(productId) || [];
+      productItems.push(orderItem);
+      orderItemsByProduct.set(productId, productItems);
+    }
 
-      console.log(`🔹 Processing: productId=${orderItem.productId}, designCode=${orderDesignCode}, receivedQty=${receivedQty}`);
+    for (const productId of receivedByProduct.keys()) {
+      if (!orderItemsByProduct.has(productId)) {
+        return res.status(400).json({
+          message: 'Verification contains a product that is not in this order',
+        });
+      }
+    }
+    for (const productId of orderItemsByProduct.keys()) {
+      if (!receivedByProduct.has(productId)) {
+        return res.status(400).json({
+          message: 'A received quantity is required for every product in this order',
+        });
+      }
+    }
 
-      orderItem.receivedQty = receivedQty;
+    for (const [productId, orderItems] of orderItemsByProduct) {
+      const receivedQty = receivedByProduct.get(productId);
+      distributeReceivedQuantity(orderItems, receivedQty);
 
       if (receivedQty > 0) {
-        // 1️⃣ Update / create design‑specific inventory (using returnDocument)
-        const rawInventory = await Inventory.findOneAndUpdate(
-          {
-            productId: orderItem.productId,
-            type: 'RAW',
-            designCode: orderDesignCode,
-          },
-          {
-            $inc: { quantity: receivedQty },
-            $set: { isActive: true },
-            $setOnInsert: {
-              productId: orderItem.productId,
-              type: 'RAW',
-              designCode: orderDesignCode,
-              minThreshold: 0,
-              barcodes: [],
-            },
-          },
-          {
-            returnDocument: 'after',   // instead of new: true
-            upsert: true,
-            runValidators: true,
-          }
-        );
-        console.log(`✅ Inventory updated: ${rawInventory._id} -> ${rawInventory.quantity}`);
-
-        affectedProductIds.add(String(orderItem.productId));
-      } else {
-        console.log(`⚠️ receivedQty is 0, skipping inventory update.`);
-      }
-    }
-
-    // 2️⃣ Recalculate product rawQuantity for all affected products
-    for (const productId of affectedProductIds) {
-      const totalRaw = await Inventory.aggregate([
-        {
-          $match: {
-            productId: new mongoose.Types.ObjectId(productId),
-            type: 'RAW',
-          },
-        },
-        { $group: { _id: null, total: { $sum: '$quantity' } } },
-      ]);
-
-      const newTotal = totalRaw.length > 0 ? totalRaw[0].total : 0;
-
-      const updatedProduct = await Product.findByIdAndUpdate(
-        productId,
-        { $set: { rawQuantity: newTotal } },
-        { new: true, upsert: false }
-      );
-
-      if (updatedProduct) {
-        console.log(`✅ Product rawQuantity recalculated: ${updatedProduct.name} -> ${updatedProduct.rawQuantity}`);
-      } else {
-        console.warn(`⚠️ Product not found for ID: ${productId}`);
+        // This service always updates the single product-level RAW record:
+        // { productId, type: 'RAW', designCode: null }.
+        await addRawStock(productId, receivedQty);
       }
     }
 
     po.status = 'VERIFIED';
     await po.save();
 
-    res.json({
-      message: 'Purchase order verified and stock updated (design + product aggregate)',
+    return res.json({
+      message: 'Purchase order verified and product RAW stock updated',
       purchaseOrder: po,
     });
   } catch (err) {
-    console.error('❌ Verify error:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Verify purchase order error', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -204,12 +213,11 @@ const listPurchaseOrders = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(50)
       .populate('items.productId', 'name')
-      .populate('items.designId', 'name designCode')
       .lean();
-    res.json({ purchaseOrders: pos });
+    return res.json({ purchaseOrders: pos });
   } catch (err) {
     console.error('List purchase orders error', err);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -227,18 +235,20 @@ const updatePurchaseOrder = async (req, res) => {
     }
 
     if (purchaseDate) {
-      const d = new Date(purchaseDate);
-      if (isNaN(d.getTime())) return res.status(400).json({ message: 'Invalid date' });
-      po.purchaseDate = d;
+      const date = new Date(purchaseDate);
+      if (Number.isNaN(date.getTime())) {
+        return res.status(400).json({ message: 'Invalid date' });
+      }
+      po.purchaseDate = date;
     }
     if (supplierName) po.supplierName = supplierName.trim();
-    if (notes !== undefined) po.notes = notes.trim();
+    if (notes !== undefined) po.notes = String(notes).trim();
 
     await po.save();
-    res.json({ message: 'Order updated', purchaseOrder: po });
+    return res.json({ message: 'Order updated', purchaseOrder: po });
   } catch (err) {
-    console.error('Update error', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Update purchase order error', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
