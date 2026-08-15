@@ -1,3 +1,4 @@
+
 const Category = require('../models/Category');
 const Product = require('../models/Product');
 
@@ -80,14 +81,14 @@ const createProduct = async (req, res) => {
       attributes,
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       message: 'Product created successfully',
       product,
     });
   } catch (err) {
     console.error('Create product error', err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: 'Server error',
     });
   }
@@ -103,11 +104,13 @@ const getProducts = async (req, res) => {
       .populate('categoryId', 'name metaFields')
       .sort({ createdAt: -1 });
 
-    res.json({ products });
+    return res.json({
+      products,
+    });
   } catch (err) {
     console.error('Get products error', err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: 'Server error',
     });
   }
@@ -130,11 +133,13 @@ const getProductById = async (req, res) => {
       });
     }
 
-    res.json({ product });
+    return res.json({
+      product,
+    });
   } catch (err) {
     console.error('Get product by id error', err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: 'Server error',
     });
   }
@@ -157,7 +162,7 @@ const updateProduct = async (req, res) => {
       });
     }
 
-    if (attributes) {
+    if (attributes !== undefined) {
       const errors = validateAttributes(
         product.categoryId,
         attributes
@@ -173,7 +178,7 @@ const updateProduct = async (req, res) => {
       product.attributes = attributes;
     }
 
-    if (name) {
+    if (name !== undefined) {
       product.name = name;
     }
 
@@ -183,14 +188,14 @@ const updateProduct = async (req, res) => {
 
     await product.save();
 
-    res.json({
+    return res.json({
       message: 'Product updated successfully',
       product,
     });
   } catch (err) {
     console.error('Update product error', err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: 'Server error',
     });
   }
@@ -198,11 +203,24 @@ const updateProduct = async (req, res) => {
 
 
 // DELETE /api/products/:id
+// Soft delete product without triggering full document validation.
+// This avoids errors for older products that may not have attributes.
 const deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const product = await Product.findById(id);
+    const product = await Product.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          isActive: false,
+        },
+      },
+      {
+        new: true,
+        runValidators: false,
+      }
+    );
 
     if (!product) {
       return res.status(404).json({
@@ -210,17 +228,14 @@ const deleteProduct = async (req, res) => {
       });
     }
 
-    product.isActive = false;
-
-    await product.save();
-
-    res.json({
+    return res.json({
       message: 'Product deactivated successfully',
+      product,
     });
   } catch (err) {
     console.error('Delete product error', err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: 'Server error',
     });
   }
@@ -234,3 +249,4 @@ module.exports = {
   updateProduct,
   deleteProduct,
 };
+
