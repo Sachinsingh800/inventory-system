@@ -7,22 +7,19 @@ const productSchema = new mongoose.Schema(
       ref: 'Category',
       required: true,
     },
+
     name: {
       type: String,
       required: true,
       trim: true,
     },
-    // dynamic attributes keyed by category.metaFields (e.g. brand, model, materialType, sizeVariant)
+
+    // Dynamic attributes defined by category.metaFields
     attributes: {
       type: Object,
       required: true,
     },
-    skuBase: {
-      type: String,
-      required: true,
-      unique: true, // base SKU for raw/printed inventory
-      trim: true,
-    },
+
     isActive: {
       type: Boolean,
       default: true,

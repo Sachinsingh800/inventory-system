@@ -2,23 +2,15 @@ const Product = require('../models/Product');
 const ProductDesign = require('../models/ProductDesign');
 const Inventory = require('../models/Inventory');
 
+
 // POST /api/product-designs
-// body: {
-//   productId,
-//   name,
-//   mode,
-//   designCode,
-//   rawQuantity,
-//   minThreshold,
-//   designUrl,
-//   notes
-// }
 const createProductDesign = async (req, res) => {
   try {
     const {
       productId,
       name,
       mode,
+      sku,
       designCode,
       rawQuantity = 0,
       minThreshold = 0,
@@ -26,9 +18,9 @@ const createProductDesign = async (req, res) => {
       notes = '',
     } = req.body;
 
-    if (!productId || !name || !mode || !designCode) {
+    if (!productId || !name || !mode || !sku || !designCode) {
       return res.status(400).json({
-        message: 'productId, name, mode and designCode are required',
+        message: 'productId, name, mode, sku and designCode are required',
       });
     }
 
@@ -49,11 +41,40 @@ const createProductDesign = async (req, res) => {
       });
     }
 
+    const normalizedSku = String(sku).trim().toUpperCase();
+    const normalizedDesignCode = String(designCode)
+      .trim()
+      .toUpperCase();
+
+    // Check duplicate SKU
+    const existingSku = await ProductDesign.findOne({
+      sku: normalizedSku,
+    });
+
+    if (existingSku) {
+      return res.status(409).json({
+        message: 'This SKU already exists',
+      });
+    }
+
+    // Check duplicate design code for this product
+    const existingDesign = await ProductDesign.findOne({
+      productId,
+      designCode: normalizedDesignCode,
+    });
+
+    if (existingDesign) {
+      return res.status(409).json({
+        message: 'This design code already exists for the selected product',
+      });
+    }
+
     const design = await ProductDesign.create({
       productId,
       name,
       mode,
-      designCode: String(designCode).trim().toUpperCase(),
+      sku: normalizedSku,
+      designCode: normalizedDesignCode,
       designUrl,
       notes,
       isActive: true,
@@ -70,9 +91,11 @@ const createProductDesign = async (req, res) => {
         $inc: {
           quantity: Number(rawQuantity),
         },
+
         $set: {
           isActive: true,
         },
+
         $setOnInsert: {
           productId,
           type: 'RAW',
@@ -98,7 +121,7 @@ const createProductDesign = async (req, res) => {
 
     if (err.code === 11000) {
       return res.status(409).json({
-        message: 'This design code already exists for the selected product',
+        message: 'SKU or design code already exists',
       });
     }
 
@@ -107,6 +130,7 @@ const createProductDesign = async (req, res) => {
     });
   }
 };
+
 
 // GET /api/product-designs/product/:productId
 const getProductDesigns = async (req, res) => {
@@ -128,11 +152,21 @@ const getProductDesigns = async (req, res) => {
   }
 };
 
+
 // PUT /api/product-designs/:id
 const updateProductDesign = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, mode, designCode, designUrl, notes, isActive } = req.body;
+
+    const {
+      name,
+      mode,
+      sku,
+      designCode,
+      designUrl,
+      notes,
+      isActive,
+    } = req.body;
 
     const design = await ProductDesign.findById(id);
 
@@ -142,16 +176,51 @@ const updateProductDesign = async (req, res) => {
       });
     }
 
-    if (name !== undefined) design.name = name;
-    if (mode !== undefined) design.mode = mode;
-
-    if (designCode !== undefined) {
-      design.designCode = String(designCode).trim().toUpperCase();
+    if (name !== undefined) {
+      design.name = name;
     }
 
-    if (designUrl !== undefined) design.designUrl = designUrl;
-    if (notes !== undefined) design.notes = notes;
-    if (typeof isActive === 'boolean') design.isActive = isActive;
+    if (mode !== undefined) {
+      design.mode = mode;
+    }
+
+    if (sku !== undefined) {
+      const normalizedSku = String(sku)
+        .trim()
+        .toUpperCase();
+
+      // Check if SKU belongs to another design
+      const existingSku = await ProductDesign.findOne({
+        sku: normalizedSku,
+        _id: { $ne: id },
+      });
+
+      if (existingSku) {
+        return res.status(409).json({
+          message: 'This SKU already exists',
+        });
+      }
+
+      design.sku = normalizedSku;
+    }
+
+    if (designCode !== undefined) {
+      design.designCode = String(designCode)
+        .trim()
+        .toUpperCase();
+    }
+
+    if (designUrl !== undefined) {
+      design.designUrl = designUrl;
+    }
+
+    if (notes !== undefined) {
+      design.notes = notes;
+    }
+
+    if (typeof isActive === 'boolean') {
+      design.isActive = isActive;
+    }
 
     await design.save();
 
@@ -164,7 +233,7 @@ const updateProductDesign = async (req, res) => {
 
     if (err.code === 11000) {
       return res.status(409).json({
-        message: 'This design code already exists for the selected product',
+        message: 'SKU or design code already exists',
       });
     }
 
@@ -173,6 +242,7 @@ const updateProductDesign = async (req, res) => {
     });
   }
 };
+
 
 // DELETE /api/product-designs/:id
 const deleteProductDesign = async (req, res) => {
@@ -188,6 +258,7 @@ const deleteProductDesign = async (req, res) => {
     }
 
     design.isActive = false;
+
     await design.save();
 
     return res.json({
@@ -201,6 +272,7 @@ const deleteProductDesign = async (req, res) => {
     });
   }
 };
+
 
 module.exports = {
   createProductDesign,

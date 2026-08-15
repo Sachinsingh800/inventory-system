@@ -1,10 +1,9 @@
 // src/controllers/inventoryController.js
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const Inventory = require('../models/Inventory');
-const ProductDesign = require('../models/ProductDesign');
-const Barcode = require('../models/Barcode');
-
+const Inventory = require("../models/Inventory");
+const ProductDesign = require("../models/ProductDesign");
+const Barcode = require("../models/Barcode");
 
 // POST /api/inventory/raw
 // body: { productId, quantity, minThreshold? }
@@ -14,12 +13,14 @@ const addRawInventory = async (req, res) => {
     const { productId, quantity, minThreshold } = req.body;
 
     if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
-      return res.status(400).json({ message: 'A valid productId is required' });
+      return res.status(400).json({ message: "A valid productId is required" });
     }
 
     const stockQuantity = Number(quantity);
     if (!Number.isSafeInteger(stockQuantity) || stockQuantity < 1) {
-      return res.status(400).json({ message: 'quantity must be a positive whole number' });
+      return res
+        .status(400)
+        .json({ message: "quantity must be a positive whole number" });
     }
 
     const update = {
@@ -27,7 +28,7 @@ const addRawInventory = async (req, res) => {
       $set: { isActive: true },
       $setOnInsert: {
         productId,
-        type: 'RAW',
+        type: "RAW",
         designCode: null,
         minThreshold: 0,
         barcodes: [],
@@ -37,21 +38,25 @@ const addRawInventory = async (req, res) => {
     if (minThreshold !== undefined) {
       const threshold = Number(minThreshold);
       if (!Number.isSafeInteger(threshold) || threshold < 0) {
-        return res.status(400).json({ message: 'minThreshold must be a non-negative whole number' });
+        return res.status(400).json({
+          message: "minThreshold must be a non-negative whole number",
+        });
       }
       update.$set.minThreshold = threshold;
     }
 
     const inventory = await Inventory.findOneAndUpdate(
-      { productId, type: 'RAW', designCode: null },
+      { productId, type: "RAW", designCode: null },
       update,
-      { new: true, upsert: true, runValidators: true }
+      { new: true, upsert: true, runValidators: true },
     );
 
-    return res.status(201).json({ message: 'RAW stock added successfully', inventory });
+    return res
+      .status(201)
+      .json({ message: "RAW stock added successfully", inventory });
   } catch (err) {
-    console.error('Add RAW inventory error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error("Add RAW inventory error:", err);
+    return res.status(500).json({ message: "Server error" });
   }
 };
 // POST /api/inventory/raw/design
@@ -62,13 +67,13 @@ const addDesignToRawInventory = async (req, res) => {
 
     if (!productId || !designId) {
       return res.status(400).json({
-        message: 'productId and designId are required',
+        message: "productId and designId are required",
       });
     }
 
     if (!quantity || Number(quantity) < 1) {
       return res.status(400).json({
-        message: 'quantity must be greater than 0',
+        message: "quantity must be greater than 0",
       });
     }
 
@@ -80,14 +85,14 @@ const addDesignToRawInventory = async (req, res) => {
 
     if (!design) {
       return res.status(400).json({
-        message: 'Selected model/design does not belong to this product',
+        message: "Selected model/design does not belong to this product",
       });
     }
 
     const inventory = await Inventory.findOneAndUpdate(
       {
         productId,
-        type: 'RAW',
+        type: "RAW",
         designCode: design.designCode,
       },
       {
@@ -99,7 +104,7 @@ const addDesignToRawInventory = async (req, res) => {
         },
         $setOnInsert: {
           productId,
-          type: 'RAW',
+          type: "RAW",
           designCode: design.designCode,
           minThreshold: minThreshold ?? 0,
           barcodes: [],
@@ -109,18 +114,18 @@ const addDesignToRawInventory = async (req, res) => {
         new: true,
         upsert: true,
         runValidators: true,
-      }
+      },
     );
 
     return res.status(201).json({
-      message: 'Model/design added to RAW inventory successfully',
+      message: "Model/design added to RAW inventory successfully",
       inventory,
     });
   } catch (err) {
-    console.error('Add design raw inventory error:', err);
+    console.error("Add design raw inventory error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -133,13 +138,13 @@ const transferRawToPrintedInventory = async (req, res) => {
 
     if (!productId || !designId) {
       return res.status(400).json({
-        message: 'productId and designId are required',
+        message: "productId and designId are required",
       });
     }
 
     if (!quantity || Number(quantity) < 1) {
       return res.status(400).json({
-        message: 'quantity must be greater than 0',
+        message: "quantity must be greater than 0",
       });
     }
 
@@ -151,7 +156,7 @@ const transferRawToPrintedInventory = async (req, res) => {
 
     if (!design) {
       return res.status(400).json({
-        message: 'Selected model/design does not belong to this product',
+        message: "Selected model/design does not belong to this product",
       });
     }
 
@@ -160,7 +165,7 @@ const transferRawToPrintedInventory = async (req, res) => {
     const rawInventory = await Inventory.findOneAndUpdate(
       {
         productId,
-        type: 'RAW',
+        type: "RAW",
         designCode: design.designCode,
         quantity: { $gte: moveQuantity },
       },
@@ -169,19 +174,19 @@ const transferRawToPrintedInventory = async (req, res) => {
           quantity: -moveQuantity,
         },
       },
-      { new: true }
+      { new: true },
     );
 
     if (!rawInventory) {
       return res.status(400).json({
-        message: 'Insufficient RAW inventory for this model/design',
+        message: "Insufficient RAW inventory for this model/design",
       });
     }
 
     const printedInventory = await Inventory.findOneAndUpdate(
       {
         productId,
-        type: 'PRINTED',
+        type: "PRINTED",
         designCode: design.designCode,
       },
       {
@@ -193,7 +198,7 @@ const transferRawToPrintedInventory = async (req, res) => {
         },
         $setOnInsert: {
           productId,
-          type: 'PRINTED',
+          type: "PRINTED",
           designCode: design.designCode,
           minThreshold: 0,
           barcodes: [],
@@ -203,19 +208,19 @@ const transferRawToPrintedInventory = async (req, res) => {
         new: true,
         upsert: true,
         runValidators: true,
-      }
+      },
     );
 
     return res.json({
-      message: 'RAW stock transferred to PRINTED stock successfully',
+      message: "RAW stock transferred to PRINTED stock successfully",
       rawInventory,
       printedInventory,
     });
   } catch (err) {
-    console.error('Transfer RAW to PRINTED inventory error:', err);
+    console.error("Transfer RAW to PRINTED inventory error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -228,7 +233,7 @@ const getDesignInventoryByProduct = async (req, res) => {
 
     if (!mongoose.Types.ObjectId.isValid(productId)) {
       return res.status(400).json({
-        message: 'Invalid product ID',
+        message: "Invalid product ID",
       });
     }
     // Include the model-level RAW row (designCode: null) and every
@@ -249,13 +254,13 @@ const getDesignInventoryByProduct = async (req, res) => {
       },
       {
         $group: {
-          _id: '$designCode',
+          _id: "$designCode",
           totalBarcodes: { $sum: 1 },
           availableBarcodes: {
-            $sum: { $cond: [{ $eq: ['$status', 'AVAILABLE'] }, 1, 0] },
+            $sum: { $cond: [{ $eq: ["$status", "AVAILABLE"] }, 1, 0] },
           },
           usedBarcodes: {
-            $sum: { $cond: [{ $eq: ['$status', 'USED'] }, 1, 0] },
+            $sum: { $cond: [{ $eq: ["$status", "USED"] }, 1, 0] },
           },
         },
       },
@@ -271,17 +276,21 @@ const getDesignInventoryByProduct = async (req, res) => {
     });
 
     // Gather all unique designCodes to fetch designUrls
-    const designCodes = [...new Set(inventory.filter((row) => row.designCode).map((row) => row.designCode))];
+    const designCodes = [
+      ...new Set(
+        inventory.filter((row) => row.designCode).map((row) => row.designCode),
+      ),
+    ];
     const designs = await ProductDesign.find({
       productId,
       designCode: { $in: designCodes },
       isActive: true,
     })
-      .select('designCode designUrl name mode')
+      .select("designCode designUrl name mode sku")
       .lean();
 
     const designMap = {};
-    designs.forEach(d => {
+    designs.forEach((d) => {
       designMap[d.designCode] = d;
     });
 
@@ -300,8 +309,9 @@ const getDesignInventoryByProduct = async (req, res) => {
         availableBarcodes: stats.availableBarcodes,
         usedBarcodes: stats.usedBarcodes,
         designName: design.name || null,
+        designSku: design.sku || null,
         mode: design.mode || null,
-        designUrl: design.designUrl || '',   // 🆕 designUrl from ProductDesign
+        designUrl: design.designUrl || "",
       };
     });
 
@@ -309,10 +319,10 @@ const getDesignInventoryByProduct = async (req, res) => {
       inventory: detailedInventory,
     });
   } catch (err) {
-    console.error('Get design inventory error:', err);
+    console.error("Get design inventory error:", err);
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -324,28 +334,30 @@ const updateInventoryThreshold = async (req, res) => {
     const { minThreshold } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: 'Invalid inventory ID' });
+      return res.status(400).json({ message: "Invalid inventory ID" });
     }
 
     const threshold = Number(minThreshold);
     if (minThreshold === undefined || isNaN(threshold) || threshold < 0) {
-      return res.status(400).json({ message: 'minThreshold must be a non-negative number' });
+      return res
+        .status(400)
+        .json({ message: "minThreshold must be a non-negative number" });
     }
 
     const updated = await Inventory.findByIdAndUpdate(
       id,
       { $set: { minThreshold: threshold } },
-      { new: true, runValidators: true }
+      { new: true, runValidators: true },
     );
 
     if (!updated) {
-      return res.status(404).json({ message: 'Inventory record not found' });
+      return res.status(404).json({ message: "Inventory record not found" });
     }
 
-    return res.json({ message: 'Threshold updated', inventory: updated });
+    return res.json({ message: "Threshold updated", inventory: updated });
   } catch (err) {
-    console.error('Update inventory threshold error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error("Update inventory threshold error:", err);
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -358,42 +370,42 @@ const getLowStockInventory = async (req, res) => {
         $match: {
           isActive: true,
           minThreshold: { $gt: 0 },
-          $expr: { $lte: ['$quantity', '$minThreshold'] },
+          $expr: { $lte: ["$quantity", "$minThreshold"] },
         },
       },
       {
         $lookup: {
-          from: 'products',
-          localField: 'productId',
-          foreignField: '_id',
-          as: 'product',
+          from: "products",
+          localField: "productId",
+          foreignField: "_id",
+          as: "product",
         },
       },
-      { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
       {
         $lookup: {
-          from: 'productdesigns',
-          let: { code: '$designCode' },
+          from: "productdesigns",
+          let: { code: "$designCode" },
           pipeline: [
-            { $match: { $expr: { $eq: ['$designCode', '$$code'] } } },
+            { $match: { $expr: { $eq: ["$designCode", "$$code"] } } },
             { $project: { name: 1, mode: 1, designCode: 1, designUrl: 1 } },
           ],
-          as: 'design',
+          as: "design",
         },
       },
-      { $unwind: { path: '$design', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$design", preserveNullAndEmptyArrays: true } },
       {
         $project: {
           _id: 1,
           productId: 1,
-          productName: '$product.name',
+          productName: "$product.name",
           designCode: 1,
-          designName: '$design.name',
-          mode: '$design.mode',
-          designUrl: '$design.designUrl',   // ✅ designUrl already present
+          designName: "$design.name",
+          mode: "$design.mode",
+          designUrl: "$design.designUrl", // ✅ designUrl already present
           quantity: 1,
           minThreshold: 1,
-          deficit: { $subtract: ['$minThreshold', '$quantity'] },
+          deficit: { $subtract: ["$minThreshold", "$quantity"] },
           type: 1,
         },
       },
@@ -402,8 +414,8 @@ const getLowStockInventory = async (req, res) => {
 
     return res.json({ lowStockItems });
   } catch (err) {
-    console.error('Low-stock query error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error("Low-stock query error:", err);
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
