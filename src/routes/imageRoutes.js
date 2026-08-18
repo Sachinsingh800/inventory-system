@@ -48,6 +48,8 @@ const IMAGE_FOLDER = "/product-designs";
 |--------------------------------------------------------------------------
 | POST /api/images/upload
 |--------------------------------------------------------------------------
+| Upload multiple images
+|--------------------------------------------------------------------------
 */
 
 router.post("/upload", upload.array("images", 20), async (req, res) => {
@@ -67,18 +69,12 @@ router.post("/upload", upload.array("images", 20), async (req, res) => {
     const uploadedImages = [];
 
     for (const file of req.files) {
-      console.log("----------------------------------");
-      console.log("Starting upload:", file.originalname);
-      console.log("MIME:", file.mimetype);
-      console.log("Size:", file.size);
-      console.log("Folder:", IMAGE_FOLDER);
-
       try {
-        /*
-        |--------------------------------------------------------------
-        | Convert Buffer to ImageKit-supported file object
-        |--------------------------------------------------------------
-        */
+        console.log("----------------------------------");
+        console.log("Starting upload:", file.originalname);
+        console.log("MIME:", file.mimetype);
+        console.log("Size:", file.size);
+        console.log("Folder:", IMAGE_FOLDER);
 
         const imageFile = await toFile(
           file.buffer,
@@ -86,13 +82,6 @@ router.post("/upload", upload.array("images", 20), async (req, res) => {
         );
 
         console.log("Buffer converted successfully");
-
-        /*
-        |--------------------------------------------------------------
-        | Upload to ImageKit
-        |--------------------------------------------------------------
-        */
-
         console.log("Calling ImageKit...");
 
         const result = await imagekit.files.upload({
@@ -103,12 +92,6 @@ router.post("/upload", upload.array("images", 20), async (req, res) => {
         });
 
         console.log("ImageKit upload successful");
-
-        console.log({
-          fileId: result.fileId,
-          url: result.url,
-          filePath: result.filePath,
-        });
 
         uploadedImages.push({
           fileId: result.fileId,
@@ -160,6 +143,8 @@ router.post("/upload", upload.array("images", 20), async (req, res) => {
 /*
 |--------------------------------------------------------------------------
 | GET /api/images
+|--------------------------------------------------------------------------
+| Get images from /product-designs
 |--------------------------------------------------------------------------
 */
 
@@ -216,6 +201,51 @@ router.get("/", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch images",
+      error: error.message,
+      name: error.name,
+      status: error.status || null,
+    });
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| DELETE /api/images/:fileId
+|--------------------------------------------------------------------------
+| Delete one image from ImageKit
+|--------------------------------------------------------------------------
+*/
+
+router.delete("/:fileId", async (req, res) => {
+  try {
+    const { fileId } = req.params;
+
+    if (!fileId) {
+      return res.status(400).json({
+        success: false,
+        message: "fileId is required",
+      });
+    }
+
+    console.log("----------------------------------");
+    console.log("DELETE IMAGE");
+    console.log("File ID:", fileId);
+
+    await imagekit.files.delete(fileId);
+
+    console.log("Image deleted successfully");
+
+    return res.status(200).json({
+      success: true,
+      message: "Image deleted successfully",
+      fileId,
+    });
+  } catch (error) {
+    console.error("DELETE IMAGE ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete image",
       error: error.message,
       name: error.name,
       status: error.status || null,
