@@ -1,61 +1,314 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-// RAW stock belongs to a product/model. PRINTED stock belongs to a product/model
-// plus one design. A RAW record must therefore always have designCode: null.
+/*
+|--------------------------------------------------------------------------
+| INVENTORY MODEL
+|--------------------------------------------------------------------------
+|
+| RAW stock:
+|   - Belongs to a product
+|   - designCode is always null
+|
+| PRINTED stock:
+|   - Belongs to a product + design
+|   - designCode is required
+|
+| Barcode flow:
+|
+| quantity
+|   = Total PRINTED stock currently in inventory
+|
+| unbarcodedQuantity
+|   = PRINTED units that have NOT received a barcode yet
+|
+| activeBarcodeCount
+|   = AVAILABLE barcode labels currently assigned
+|
+| Example:
+|
+| Printing job completed with 10:
+|
+| quantity             = 10
+| unbarcodedQuantity   = 10
+| activeBarcodeCount   = 0
+|
+| Generate barcodes:
+|
+| quantity             = 10
+| unbarcodedQuantity   = 0
+| activeBarcodeCount   = 10
+|
+| Another printing job completed with 5:
+|
+| quantity             = 15
+| unbarcodedQuantity   = 5
+| activeBarcodeCount   = 10
+|
+|--------------------------------------------------------------------------
+*/
+
 const inventorySchema = new mongoose.Schema(
   {
+    /*
+    |--------------------------------------------------------------------------
+    | Product
+    |--------------------------------------------------------------------------
+    */
+
     productId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Product',
+      ref: "Product",
       required: true,
+      index: true,
     },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Inventory Type
+    |--------------------------------------------------------------------------
+    */
+
     type: {
       type: String,
-      enum: ['RAW', 'PRINTED'],
+      enum: ["RAW", "PRINTED"],
       required: true,
+      index: true,
     },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Design Code
+    |--------------------------------------------------------------------------
+    |
+    | RAW:
+    |   Always null
+    |
+    | PRINTED:
+    |   Required
+    |
+    */
+
     designCode: {
       type: String,
       default: null,
+      trim: true,
     },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Total Quantity
+    |--------------------------------------------------------------------------
+    |
+    | Total stock currently present.
+    |
+    */
+
     quantity: {
       type: Number,
       required: true,
       default: 0,
       min: 0,
     },
-    // Number of AVAILABLE labels currently assigned to this PRINTED row.
-    // It prevents two barcode-generation requests from labelling more items
-    // than are actually in printed stock.
+
+    /*
+    |--------------------------------------------------------------------------
+    | Unbarcoded Quantity
+    |--------------------------------------------------------------------------
+    |
+    | Only meaningful for PRINTED stock.
+    |
+    | This tells the barcode generator exactly how many
+    | newly printed units still need a barcode.
+    |
+    | Example:
+    |
+    | Printed quantity = 10
+    | Unbarcoded      = 10
+    |
+    | Generate 10 barcodes:
+    |
+    | Printed quantity = 10
+    | Unbarcoded      = 0
+    |
+    */
+
+    unbarcodedQuantity: {
+      type: Number,
+      required: true,
+      default: 0,
+      min: 0,
+    },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Active Barcode Count
+    |--------------------------------------------------------------------------
+    |
+    | Number of AVAILABLE barcode records currently assigned
+    | to this PRINTED inventory row.
+    |
+    | USED barcodes are not included.
+    |
+    */
+
     activeBarcodeCount: {
       type: Number,
       required: true,
       default: 0,
       min: 0,
     },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Minimum Threshold
+    |--------------------------------------------------------------------------
+    */
+
     minThreshold: {
       type: Number,
       default: 0,
       min: 0,
     },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Active
+    |--------------------------------------------------------------------------
+    */
+
     isActive: {
       type: Boolean,
       default: true,
+      index: true,
     },
-    // Retained for backward compatibility only. Barcode documents are the
-    // authoritative label history, so this array is not updated by the module.
+
+    /*
+    |--------------------------------------------------------------------------
+    | Legacy Barcode Array
+    |--------------------------------------------------------------------------
+    |
+    | Kept only for backward compatibility.
+    |
+    | Barcode collection is the authoritative barcode history.
+    | Do not use this array for barcode counting.
+    |
+    */
+
     barcodes: {
       type: [String],
       default: [],
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  },
 );
 
-// This gives one RAW row per product and one PRINTED row per product + design.
+/*
+|--------------------------------------------------------------------------
+| VALIDATION
+|--------------------------------------------------------------------------
+|
+| RAW inventory:
+|   designCode must always be null
+|
+| PRINTED inventory:
+|   designCode must exist
+|
+*/
+
+inventorySchema.pre("validate", function (next) {
+  if (this.type === "RAW") {
+    this.designCode = null;
+  }
+
+  if (
+    this.type === "PRINTED" &&
+    !this.designCode
+  ) {
+    return next(
+      new Error(
+        "PRINTED inventory requires designCode",
+      ),
+    );
+  }
+
+  /*
+  |----------------------------------------------------------------------
+  | RAW stock should never have barcode-related quantities
+  |----------------------------------------------------------------------
+  */
+
+  if (this.type === "RAW") {
+    this.unbarcodedQuantity = 0;
+    this.activeBarcodeCount = 0;
+  }
+
+  next();
+});
+
+/*
+|--------------------------------------------------------------------------
+| MAIN UNIQUE INDEX
+|--------------------------------------------------------------------------
+|
+| One RAW row:
+|
+|   product + RAW + null
+|
+| One PRINTED row:
+|
+|   product + PRINTED + designCode
+|
+*/
+
 inventorySchema.index(
-  { productId: 1, type: 1, designCode: 1 },
-  { unique: true }
+  {
+    productId: 1,
+    type: 1,
+    designCode: 1,
+  },
+  {
+    unique: true,
+  },
 );
 
-module.exports = mongoose.model('Inventory', inventorySchema);
+/*
+|--------------------------------------------------------------------------
+| PRINTED STOCK LOOKUP INDEX
+|--------------------------------------------------------------------------
+|
+| Useful for barcode generation and inventory operations.
+|
+*/
+
+inventorySchema.index({
+  productId: 1,
+  type: 1,
+  designCode: 1,
+  isActive: 1,
+});
+
+/*
+|--------------------------------------------------------------------------
+| BARCODE-RELATED LOOKUP INDEX
+|--------------------------------------------------------------------------
+*/
+
+inventorySchema.index({
+  productId: 1,
+  designCode: 1,
+  type: 1,
+  unbarcodedQuantity: 1,
+});
+
+/*
+|--------------------------------------------------------------------------
+| MODEL
+|--------------------------------------------------------------------------
+*/
+
+module.exports = mongoose.model(
+  "Inventory",
+  inventorySchema,
+);

@@ -1,10 +1,10 @@
-const crypto = require('crypto');
-const mongoose = require('mongoose');
+const crypto = require("crypto");
+const mongoose = require("mongoose");
 
-const Barcode = require('../models/Barcode');
-const Inventory = require('../models/Inventory');
-const Product = require('../models/Product');
-const ProductDesign = require('../models/ProductDesign');
+const Barcode = require("../models/Barcode");
+const Inventory = require("../models/Inventory");
+const Product = require("../models/Product");
+const ProductDesign = require("../models/ProductDesign");
 
 /* -------------------------------------------------------------------------- */
 /* Barcode code                                                               */
@@ -13,25 +13,25 @@ const ProductDesign = require('../models/ProductDesign');
 const makeBarcodeCode = (designCode) => {
   const clean = String(designCode)
     .trim()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
     .toUpperCase();
 
   return `PR-${clean}-${crypto
     .randomUUID()
-    .replace(/-/g, '')
+    .replace(/-/g, "")
     .slice(0, 10)
     .toUpperCase()}`;
 };
 
 /* -------------------------------------------------------------------------- */
-/* Generate batch ID                                                          */
+/* Generation batch ID                                                        */
 /* -------------------------------------------------------------------------- */
 
 const makeGenerationBatchId = () => {
   return `BATCH-${crypto
     .randomUUID()
-    .replace(/-/g, '')
+    .replace(/-/g, "")
     .slice(0, 16)
     .toUpperCase()}`;
 };
@@ -42,25 +42,25 @@ const makeGenerationBatchId = () => {
 /*
  * IMPORTANT:
  *
- * We count ALL existing barcodes:
- *
- * AVAILABLE + USED
- *
- * because USED barcodes were already generated previously.
+ * The Barcode collection is the source of truth for how many
+ * PRINTED units already have a barcode.
  *
  * Example:
  *
- * PRINTED STOCK = 100
+ * PRINTED STOCK       = 22
  *
  * Existing barcodes:
- * AVAILABLE = 70
- * USED       = 20
+ * AVAILABLE           = 9
+ * USED                = 3
+ * TOTAL BARCODED      = 12
  *
- * Total generated = 90
+ * New barcode count:
  *
- * New barcode count = 100 - 90 = 10
+ * 22 - 12 = 10
  *
- * We do NOT generate 30.
+ * Therefore this request creates exactly 10 NEW barcodes.
+ *
+ * It NEVER recreates the previous 12.
  */
 
 const generateBarcodes = async (req, res) => {
@@ -69,180 +69,244 @@ const generateBarcodes = async (req, res) => {
   try {
     const { productId, designId } = req.body;
 
+    /* ---------------------------------------------------------------------- */
+    /* Validation                                                             */
+    /* ---------------------------------------------------------------------- */
+
     if (!productId || !designId) {
       return res.status(400).json({
-        message: 'productId and designId are required',
+        message:
+          "productId and designId are required",
       });
     }
 
-    if (!mongoose.Types.ObjectId.isValid(productId)) {
+    if (
+      !mongoose.Types.ObjectId.isValid(
+        productId,
+      )
+    ) {
       return res.status(400).json({
-        message: 'Invalid productId',
+        message: "Invalid productId",
       });
     }
 
-    if (!mongoose.Types.ObjectId.isValid(designId)) {
+    if (
+      !mongoose.Types.ObjectId.isValid(
+        designId,
+      )
+    ) {
       return res.status(400).json({
-        message: 'Invalid designId',
+        message: "Invalid designId",
       });
     }
 
-    /*
-     * Verify design belongs to selected product.
-     */
-    const design = await ProductDesign.findOne({
-      _id: designId,
-      productId,
-      isActive: true,
-    }).lean();
+    /* ---------------------------------------------------------------------- */
+    /* Validate design                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    const design =
+      await ProductDesign.findOne({
+        _id: designId,
+        productId,
+        isActive: true,
+      }).lean();
 
     if (!design) {
       return res.status(400).json({
         message:
-          'Selected model/design does not belong to this product',
+          "Selected model/design does not belong to this product",
       });
     }
+
+    /* ---------------------------------------------------------------------- */
+    /* Start transaction                                                      */
+    /* ---------------------------------------------------------------------- */
 
     session = await mongoose.startSession();
 
     let barcodes = [];
     let printedInventory = null;
 
-    const generationBatchId = makeGenerationBatchId();
+    const generationBatchId =
+      makeGenerationBatchId();
 
     /*
-     * Same exact timestamp for every barcode in this generation request.
+     * Every barcode generated by this request
+     * gets the exact same generation timestamp.
      */
     const generatedAt = new Date();
 
     await session.withTransaction(async () => {
-      /* ------------------------------------------------------------------ */
-      /* Find PRINTED inventory                                             */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Find PRINTED inventory                                               */
+      /* -------------------------------------------------------------------- */
 
-      printedInventory = await Inventory.findOne({
-        productId,
-        type: 'PRINTED',
-        designCode: design.designCode,
-        isActive: true,
-      }).session(session);
+      printedInventory =
+        await Inventory.findOne({
+          productId,
+          type: "PRINTED",
+          designCode: design.designCode,
+          isActive: true,
+        }).session(session);
 
       if (!printedInventory) {
         throw new Error(
-          'No PRINTED stock exists for this design',
+          "No PRINTED stock exists for this design",
         );
       }
 
       const printedQuantity =
-        Number(printedInventory.quantity) || 0;
+        Number(
+          printedInventory.quantity,
+        ) || 0;
 
       if (printedQuantity < 1) {
         throw new Error(
-          'No PRINTED stock exists for this design',
+          "No PRINTED stock exists for this design",
         );
       }
 
-      /* ------------------------------------------------------------------ */
-      /* Count ALL previously generated barcodes                            */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Count ALL existing barcodes                                          */
+      /* -------------------------------------------------------------------- */
+      /*
+       * DO NOT count AVAILABLE only.
+       *
+       * USED barcodes were already generated and therefore
+       * must also be included.
+       */
 
       const existingBarcodeCount =
         await Barcode.countDocuments({
           productId,
-          designCode: design.designCode,
+          designCode:
+            design.designCode,
         }).session(session);
 
-      /* ------------------------------------------------------------------ */
-      /* Count currently AVAILABLE barcodes                                 */
-      /* ------------------------------------------------------------------ */
+      /* -------------------------------------------------------------------- */
+      /* Calculate NEW barcode count                                           */
+      /* -------------------------------------------------------------------- */
+
+      const newBarcodeCount =
+        printedQuantity -
+        existingBarcodeCount;
+
+      /*
+       * Example:
+       *
+       * 22 PRINTED
+       * 12 existing barcodes
+       *
+       * 22 - 12 = 10
+       */
+
+      if (newBarcodeCount <= 0) {
+        throw new Error(
+          "All PRINTED stock for this design already has barcodes",
+        );
+      }
+
+      /* -------------------------------------------------------------------- */
+      /* Create ONLY NEW barcode documents                                     */
+      /* -------------------------------------------------------------------- */
+
+      const barcodeDocuments =
+        Array.from(
+          {
+            length:
+              newBarcodeCount,
+          },
+          () => ({
+            code: makeBarcodeCode(
+              design.designCode,
+            ),
+
+            productId,
+
+            designCode:
+              design.designCode,
+
+            generationBatchId,
+
+            generatedAt,
+
+            status: "AVAILABLE",
+
+            usedAt: null,
+          }),
+        );
+
+      barcodes =
+        await Barcode.insertMany(
+          barcodeDocuments,
+          {
+            session,
+            ordered: true,
+          },
+        );
+
+      /* -------------------------------------------------------------------- */
+      /* Recalculate AVAILABLE barcode count                                  */
+      /* -------------------------------------------------------------------- */
 
       const availableBarcodeCount =
         await Barcode.countDocuments({
           productId,
-          designCode: design.designCode,
-          status: 'AVAILABLE',
+          designCode:
+            design.designCode,
+          status: "AVAILABLE",
         }).session(session);
 
-      /* ------------------------------------------------------------------ */
-      /* Calculate ONLY newly required barcodes                              */
-      /* ------------------------------------------------------------------ */
-
-      const newBarcodeCount =
-        printedQuantity - existingBarcodeCount;
+      /* -------------------------------------------------------------------- */
+      /* Synchronize inventory                                                 */
+      /* -------------------------------------------------------------------- */
 
       /*
-       * No new barcodes needed.
+       * `unbarcodedQuantity` is only a helper/cache.
        *
-       * IMPORTANT:
-       * Even USED barcodes are counted above.
+       * We calculate it from:
+       *
+       * total PRINTED quantity
+       * -
+       * total barcode records
+       *
+       * This also fixes old inventory records that were created
+       * before `unbarcodedQuantity` existed.
        */
-      if (newBarcodeCount <= 0) {
-        throw new Error(
-          'All current PRINTED stock for this design already has barcodes',
+
+      const totalBarcodeCount =
+        existingBarcodeCount +
+        newBarcodeCount;
+
+      const unbarcodedQuantity =
+        Math.max(
+          0,
+          printedQuantity -
+            totalBarcodeCount,
         );
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Create ONLY new barcode documents                                  */
-      /* ------------------------------------------------------------------ */
-
-      const barcodeDocuments = Array.from(
-        { length: newBarcodeCount },
-        () => ({
-          code: makeBarcodeCode(
-            design.designCode,
-          ),
-
-          productId,
-
-          designCode: design.designCode,
-
-          generationBatchId,
-
-          generatedAt,
-
-          status: 'AVAILABLE',
-
-          usedAt: null,
-        }),
-      );
-
-      barcodes = await Barcode.insertMany(
-        barcodeDocuments,
-        {
-          session,
-          ordered: true,
-        },
-      );
-
-      /* ------------------------------------------------------------------ */
-      /* Update inventory barcode counter                                   */
-      /* ------------------------------------------------------------------ */
-      /*
-       * availableBarcodeCount = old available barcodes
-       *
-       * newBarcodeCount = newly generated AVAILABLE barcodes
-       *
-       * Therefore:
-       *
-       * activeBarcodeCount =
-       * old available + newly generated
-       *
-       * USED barcodes are intentionally not included.
-       */
-      const newActiveBarcodeCount =
-        availableBarcodeCount + newBarcodeCount;
 
       printedInventory =
         await Inventory.findOneAndUpdate(
           {
-            _id: printedInventory._id,
-            quantity: printedInventory.quantity,
+            _id:
+              printedInventory._id,
+
+            quantity:
+              printedInventory.quantity,
           },
           {
             $set: {
+              /*
+               * Number of AVAILABLE barcode labels.
+               */
               activeBarcodeCount:
-                newActiveBarcodeCount,
+                availableBarcodeCount,
+
+              /*
+               * Printed units still waiting
+               * for barcode generation.
+               */
+              unbarcodedQuantity,
             },
           },
           {
@@ -253,47 +317,66 @@ const generateBarcodes = async (req, res) => {
 
       if (!printedInventory) {
         throw new Error(
-          'PRINTED inventory changed; please generate barcodes again',
+          "PRINTED inventory changed; please generate barcodes again",
         );
       }
     });
 
+    /* ---------------------------------------------------------------------- */
+    /* Response                                                               */
+    /* ---------------------------------------------------------------------- */
+
     return res.status(201).json({
       message:
-        `${barcodes.length} barcode(s) generated from PRINTED stock`,
+        `${barcodes.length} barcode(s) generated successfully`,
 
       generation: {
-        batchId: generationBatchId,
+        batchId:
+          generationBatchId,
+
         generatedAt,
-        barcodeCount: barcodes.length,
+
+        barcodeCount:
+          barcodes.length,
       },
 
       design: {
         id: design._id,
         name: design.name,
         mode: design.mode,
-        designCode: design.designCode,
+        designCode:
+          design.designCode,
       },
 
       printedInventory: {
-        id: printedInventory._id,
-        quantity: printedInventory.quantity,
+        id:
+          printedInventory._id,
+
+        quantity:
+          printedInventory.quantity,
+
+        unbarcodedQuantity:
+          printedInventory.unbarcodedQuantity,
+
         activeBarcodeCount:
           printedInventory.activeBarcodeCount,
       },
 
-      barcodeCount: barcodes.length,
+      barcodeCount:
+        barcodes.length,
 
       barcodes,
     });
   } catch (error) {
     if (
-      error.message.includes('PRINTED stock') ||
       error.message.includes(
-        'already has barcodes',
+        "PRINTED stock",
       ) ||
       error.message.includes(
-        'PRINTED inventory changed',
+        "already has barcodes",
+      ) ||
+      error.message.includes(
+        "inventory changed",
       )
     ) {
       return res.status(400).json({
@@ -302,17 +385,19 @@ const generateBarcodes = async (req, res) => {
     }
 
     console.error(
-      'Generate barcodes error:',
+      "Generate barcodes error:",
       error,
     );
 
     return res.status(
-      error.code === 11000 ? 409 : 500,
+      error.code === 11000
+        ? 409
+        : 500,
     ).json({
       message:
         error.code === 11000
-          ? 'A duplicate barcode was generated. Please try again.'
-          : 'Server error',
+          ? "A duplicate barcode was generated. Please try again."
+          : "Server error",
     });
   } finally {
     if (session) {
@@ -331,20 +416,17 @@ const listBarcodesByProduct = async (
 ) => {
   try {
     const filter = {
-      productId: req.params.productId,
+      productId:
+        req.params.productId,
     };
 
-    if (
-      req.query.designCode
-    ) {
+    if (req.query.designCode) {
       filter.designCode = String(
         req.query.designCode,
       ).trim();
     }
 
-    if (
-      req.query.generationBatchId
-    ) {
+    if (req.query.generationBatchId) {
       filter.generationBatchId =
         String(
           req.query.generationBatchId,
@@ -352,30 +434,29 @@ const listBarcodesByProduct = async (
     }
 
     if (req.query.status) {
+      const status = String(
+        req.query.status,
+      ).trim();
+
       if (
-        !['AVAILABLE', 'USED'].includes(
-          String(req.query.status),
+        !["AVAILABLE", "USED"].includes(
+          status,
         )
       ) {
         return res.status(400).json({
           message:
-            'status must be AVAILABLE or USED',
+            "status must be AVAILABLE or USED",
         });
       }
 
-      filter.status = String(
-        req.query.status,
-      );
+      filter.status = status;
     }
 
     /* -------------------------------------------------------------------- */
-    /* Date filter                                                          */
+    /* Optional creation-date filter                                        */
     /* -------------------------------------------------------------------- */
 
-    if (
-      req.query.from ||
-      req.query.to
-    ) {
+    if (req.query.from || req.query.to) {
       filter.createdAt = {};
 
       if (req.query.from) {
@@ -383,12 +464,10 @@ const listBarcodesByProduct = async (
           `${req.query.from}T00:00:00.000`,
         );
 
-        if (
-          Number.isNaN(from.getTime())
-        ) {
+        if (Number.isNaN(from.getTime())) {
           return res.status(400).json({
             message:
-              'from must be YYYY-MM-DD',
+              "from must be YYYY-MM-DD",
           });
         }
 
@@ -400,12 +479,10 @@ const listBarcodesByProduct = async (
           `${req.query.to}T23:59:59.999`,
         );
 
-        if (
-          Number.isNaN(to.getTime())
-        ) {
+        if (Number.isNaN(to.getTime())) {
           return res.status(400).json({
             message:
-              'to must be YYYY-MM-DD',
+              "to must be YYYY-MM-DD",
           });
         }
 
@@ -414,34 +491,40 @@ const listBarcodesByProduct = async (
     }
 
     /* -------------------------------------------------------------------- */
-    /* Fetch                                                                */
+    /* Get barcodes                                                          */
     /* -------------------------------------------------------------------- */
 
-    const barcodes = await Barcode.find(
-      filter,
-    )
-      .sort({
-        createdAt: -1,
-        _id: -1,
-      })
-      .lean();
+    const barcodes =
+      await Barcode.find(
+        filter,
+      )
+        .sort({
+          createdAt: -1,
+          _id: -1,
+        })
+        .lean();
 
     /* -------------------------------------------------------------------- */
-    /* Group by design                                                      */
+    /* Group by design                                                       */
     /* -------------------------------------------------------------------- */
 
     const barcodesByDesign =
       barcodes.reduce(
-        (result, barcode) => {
+        (
+          result,
+          barcode,
+        ) => {
           const key =
             barcode.designCode ||
-            'NO_DESIGN';
+            "NO_DESIGN";
 
           if (!result[key]) {
             result[key] = [];
           }
 
-          result[key].push(barcode);
+          result[key].push(
+            barcode,
+          );
 
           return result;
         },
@@ -449,18 +532,19 @@ const listBarcodesByProduct = async (
       );
 
     /* -------------------------------------------------------------------- */
-    /* Group by generation batch                                            */
+    /* Group by generation batch                                             */
     /* -------------------------------------------------------------------- */
 
     const barcodesByBatch =
       barcodes.reduce(
-        (result, barcode) => {
+        (
+          result,
+          barcode,
+        ) => {
           /*
-           * New records have generationBatchId.
+           * New barcode records have generationBatchId.
            *
-           * Older records don't.
-           * Put those into a fallback group based
-           * on their creation date.
+           * Older barcode records may not have one.
            */
           const key =
             barcode.generationBatchId ||
@@ -469,14 +553,16 @@ const listBarcodesByProduct = async (
                   barcode.createdAt,
                 )
                   .toISOString()
-                  .slice(0, 10)
-              : 'UNKNOWN'}`;
+                  .slice(0, 19)
+              : "UNKNOWN"}`;
 
           if (!result[key]) {
             result[key] = [];
           }
 
-          result[key].push(barcode);
+          result[key].push(
+            barcode,
+          );
 
           return result;
         },
@@ -484,7 +570,7 @@ const listBarcodesByProduct = async (
       );
 
     /* -------------------------------------------------------------------- */
-    /* Build batch summary                                                  */
+    /* Generation batch summaries                                            */
     /* -------------------------------------------------------------------- */
 
     const generationBatches =
@@ -492,7 +578,9 @@ const listBarcodesByProduct = async (
         barcodesByBatch,
       )
         .map(
-          ([batchId, rows]) => {
+          (
+            [batchId, rows],
+          ) => {
             const first =
               rows[0];
 
@@ -500,13 +588,14 @@ const listBarcodesByProduct = async (
               rows.filter(
                 (row) =>
                   row.status ===
-                  'AVAILABLE',
+                  "AVAILABLE",
               ).length;
 
             const usedCount =
               rows.filter(
                 (row) =>
-                  row.status === 'USED',
+                  row.status ===
+                  "USED",
               ).length;
 
             return {
@@ -524,49 +613,51 @@ const listBarcodesByProduct = async (
 
               usedCount,
 
-              barcodes: rows,
+              barcodes:
+                rows,
             };
           },
         )
-        .sort((a, b) => {
-          const timeA = a.generatedAt
-            ? new Date(
-                a.generatedAt,
-              ).getTime()
-            : 0;
+        .sort(
+          (a, b) => {
+            const timeA =
+              a.generatedAt
+                ? new Date(
+                    a.generatedAt,
+                  ).getTime()
+                : 0;
 
-          const timeB = b.generatedAt
-            ? new Date(
-                b.generatedAt,
-              ).getTime()
-            : 0;
+            const timeB =
+              b.generatedAt
+                ? new Date(
+                    b.generatedAt,
+                  ).getTime()
+                : 0;
 
-          return timeB - timeA;
-        });
+            return (
+              timeB - timeA
+            );
+          },
+        );
 
     return res.json({
-      total: barcodes.length,
+      total:
+        barcodes.length,
 
       barcodes,
 
       barcodesByDesign,
 
-      /*
-       * Perfect for your frontend:
-       *
-       * Batch 10:30 AM -> 50 barcodes
-       * Batch 02:15 PM -> 20 barcodes
-       */
       generationBatches,
     });
   } catch (error) {
     console.error(
-      'List barcodes error:',
+      "List barcodes error:",
       error,
     );
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
@@ -579,56 +670,169 @@ const updateBarcodeStatus = async (
   req,
   res,
 ) => {
+  let session;
+
   try {
     const { status } = req.body;
 
     if (
-      !['AVAILABLE', 'USED'].includes(
+      !["AVAILABLE", "USED"].includes(
         status,
       )
     ) {
       return res.status(400).json({
         message:
-          'status must be AVAILABLE or USED',
+          "status must be AVAILABLE or USED",
       });
     }
 
-    const barcode =
-      await Barcode.findById(
-        req.params.id,
-      );
+    session =
+      await mongoose.startSession();
 
-    if (!barcode) {
-      return res.status(404).json({
-        message:
-          'Barcode not found',
-      });
-    }
+    let updatedBarcode = null;
 
-    barcode.status = status;
+    await session.withTransaction(
+      async () => {
+        const barcode =
+          await Barcode.findById(
+            req.params.id,
+          ).session(session);
 
-    barcode.usedAt =
-      status === 'USED'
-        ? new Date()
-        : null;
+        if (!barcode) {
+          throw new Error(
+            "Barcode not found",
+          );
+        }
 
-    await barcode.save();
+        const previousStatus =
+          barcode.status;
+
+        barcode.status = status;
+
+        barcode.usedAt =
+          status === "USED"
+            ? new Date()
+            : null;
+
+        await barcode.save({
+          session,
+        });
+
+        /* -------------------------------------------------------------- */
+        /* Keep activeBarcodeCount synchronized                           */
+        /* -------------------------------------------------------------- */
+
+        if (
+          previousStatus !==
+          status
+        ) {
+          const availableCount =
+            await Barcode.countDocuments(
+              {
+                productId:
+                  barcode.productId,
+
+                designCode:
+                  barcode.designCode,
+
+                status:
+                  "AVAILABLE",
+              },
+            ).session(session);
+
+          const totalBarcodeCount =
+            await Barcode.countDocuments(
+              {
+                productId:
+                  barcode.productId,
+
+                designCode:
+                  barcode.designCode,
+              },
+            ).session(session);
+
+          const inventory =
+            await Inventory.findOne(
+              {
+                productId:
+                  barcode.productId,
+
+                type:
+                  "PRINTED",
+
+                designCode:
+                  barcode.designCode,
+
+                isActive: true,
+              },
+            ).session(session);
+
+          if (inventory) {
+            const printedQuantity =
+              Number(
+                inventory.quantity,
+              ) || 0;
+
+            await Inventory.updateOne(
+              {
+                _id:
+                  inventory._id,
+              },
+              {
+                $set: {
+                  activeBarcodeCount:
+                    availableCount,
+
+                  unbarcodedQuantity:
+                    Math.max(
+                      0,
+                      printedQuantity -
+                        totalBarcodeCount,
+                    ),
+                },
+              },
+              {
+                session,
+              },
+            );
+          }
+        }
+
+        updatedBarcode =
+          barcode;
+      },
+    );
 
     return res.json({
       message:
-        'Barcode status updated successfully',
+        "Barcode status updated successfully",
 
-      barcode,
+      barcode:
+        updatedBarcode,
     });
   } catch (error) {
     console.error(
-      'Update barcode status error:',
+      "Update barcode status error:",
       error,
     );
 
+    if (
+      error.message ===
+      "Barcode not found"
+    ) {
+      return res.status(404).json({
+        message:
+          "Barcode not found",
+      });
+    }
+
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 
@@ -661,7 +865,7 @@ const getPackedBarcodes = async (
     );
 
     const filter = {
-      status: 'USED',
+      status: "USED",
       usedAt: {
         $ne: null,
       },
@@ -689,12 +893,10 @@ const getPackedBarcodes = async (
           `${req.query.from}T00:00:00.000`,
         );
 
-        if (
-          Number.isNaN(from.getTime())
-        ) {
+        if (Number.isNaN(from.getTime())) {
           return res.status(400).json({
             message:
-              'from must be YYYY-MM-DD',
+              "from must be YYYY-MM-DD",
           });
         }
 
@@ -706,12 +908,10 @@ const getPackedBarcodes = async (
           `${req.query.to}T23:59:59.999`,
         );
 
-        if (
-          Number.isNaN(to.getTime())
-        ) {
+        if (Number.isNaN(to.getTime())) {
           return res.status(400).json({
             message:
-              'to must be YYYY-MM-DD',
+              "to must be YYYY-MM-DD",
           });
         }
 
@@ -723,7 +923,9 @@ const getPackedBarcodes = async (
       totalPacked,
       barcodes,
     ] = await Promise.all([
-      Barcode.countDocuments(filter),
+      Barcode.countDocuments(
+        filter,
+      ),
 
       Barcode.find(filter)
         .sort({
@@ -756,6 +958,7 @@ const getPackedBarcodes = async (
             {
               productId:
                 barcode.productId,
+
               designCode:
                 barcode.designCode,
             },
@@ -774,7 +977,7 @@ const getPackedBarcodes = async (
         },
       })
         .select(
-          '_id name skuBase categoryId',
+          "_id name skuBase categoryId",
         )
         .lean(),
 
@@ -783,7 +986,7 @@ const getPackedBarcodes = async (
             $or: designPairs,
           })
             .select(
-              '_id productId name mode designCode designUrl',
+              "_id productId name mode designCode designUrl",
             )
             .lean()
         : [],
@@ -845,16 +1048,22 @@ const getPackedBarcodes = async (
               barcode.generationBatchId ||
               null,
 
-            product: product
-              ? {
-                  id: product._id,
-                  name: product.name,
-                  skuBase:
-                    product.skuBase,
-                  categoryId:
-                    product.categoryId,
-                }
-              : null,
+            product:
+              product
+                ? {
+                    id:
+                      product._id,
+
+                    name:
+                      product.name,
+
+                    skuBase:
+                      product.skuBase,
+
+                    categoryId:
+                      product.categoryId,
+                  }
+                : null,
 
             design: {
               id:
@@ -889,25 +1098,26 @@ const getPackedBarcodes = async (
 
       totalPages:
         Math.ceil(
-          totalPacked / limit,
+          totalPacked /
+            limit,
         ),
 
       packedItems,
     });
   } catch (error) {
     console.error(
-      'Get packed barcodes error:',
+      "Get packed barcodes error:",
       error,
     );
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
 
 /* -------------------------------------------------------------------------- */
-/* Today's barcode report                                                     */
+/* Today's barcode report                                                    */
 /* -------------------------------------------------------------------------- */
 
 const getBarcodeTodayReport = async (
@@ -955,13 +1165,13 @@ const getBarcodeTodayReport = async (
           $group: {
             _id: {
               productId:
-                '$productId',
+                "$productId",
 
               designCode:
-                '$designCode',
+                "$designCode",
 
               status:
-                '$status',
+                "$status",
             },
 
             quantity: {
@@ -972,8 +1182,8 @@ const getBarcodeTodayReport = async (
 
         {
           $sort: {
-            '_id.designCode': 1,
-            '_id.status': 1,
+            "_id.designCode": 1,
+            "_id.status": 1,
           },
         },
       ]);
@@ -981,8 +1191,12 @@ const getBarcodeTodayReport = async (
     return res.json({
       totalGenerated:
         report.reduce(
-          (sum, item) =>
-            sum + item.quantity,
+          (
+            sum,
+            item,
+          ) =>
+            sum +
+            item.quantity,
           0,
         ),
 
@@ -990,12 +1204,12 @@ const getBarcodeTodayReport = async (
     });
   } catch (error) {
     console.error(
-      'Get barcode today report error:',
+      "Get barcode today report error:",
       error,
     );
 
     return res.status(500).json({
-      message: 'Server error',
+      message: "Server error",
     });
   }
 };
