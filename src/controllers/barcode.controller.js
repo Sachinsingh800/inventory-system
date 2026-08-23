@@ -176,11 +176,12 @@ const generateBarcodes = async (req, res) => {
        * must also be included.
        */
 
-      const existingBarcodeCount =
+      const existingAvailableBarcodeCount =
         await Barcode.countDocuments({
           productId,
           designCode:
             design.designCode,
+          status: "AVAILABLE",
         }).session(session);
 
       /* -------------------------------------------------------------------- */
@@ -189,7 +190,7 @@ const generateBarcodes = async (req, res) => {
 
       const newBarcodeCount =
         printedQuantity -
-        existingBarcodeCount;
+        existingAvailableBarcodeCount;
 
       /*
        * Example:
@@ -273,16 +274,11 @@ const generateBarcodes = async (req, res) => {
        * This also fixes old inventory records that were created
        * before `unbarcodedQuantity` existed.
        */
-
-      const totalBarcodeCount =
-        existingBarcodeCount +
-        newBarcodeCount;
-
       const unbarcodedQuantity =
         Math.max(
           0,
           printedQuantity -
-            totalBarcodeCount,
+            availableBarcodeCount,
         );
 
       printedInventory =
@@ -787,7 +783,7 @@ const updateBarcodeStatus = async (
                     Math.max(
                       0,
                       printedQuantity -
-                        totalBarcodeCount,
+                        availableCount,
                     ),
                 },
               },

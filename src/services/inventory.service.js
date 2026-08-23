@@ -57,7 +57,7 @@ const addPrintedStock = (productId, designCode, quantity, session) =>
   Inventory.findOneAndUpdate(
     printedFilter(productId, designCode),
     {
-      $inc: { quantity },
+      $inc: { quantity, unbarcodedQuantity: quantity },
       $set: { isActive: true },
       $setOnInsert: {
         ...printedFilter(productId, designCode),

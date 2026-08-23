@@ -352,6 +352,7 @@ const transferRawToPrintedInventory = async (
         {
           $inc: {
             quantity: moveQuantity,
+            unbarcodedQuantity: moveQuantity,
           },
 
           $set: {

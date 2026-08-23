@@ -2,6 +2,7 @@
 const Barcode = require('../models/Barcode');
 const Inventory = require('../models/Inventory');
 const Product = require('../models/Product'); // make sure this path is correct
+const mongoose = require('mongoose');
 
 // NEW: POST /api/packing/lookup (ADMIN / PACKER)
 // body: { code }
@@ -61,6 +62,7 @@ const lookupBarcode = async (req, res) => {
 // POST /api/packing/scan (ADMIN / PACKER)
 // body: { code }
 const scanBarcode = async (req, res) => {
+  let session;
   try {
     const { code } = req.body;
     const userId = req.user?.id; // optional
@@ -69,39 +71,34 @@ const scanBarcode = async (req, res) => {
       return res.status(400).json({ message: 'Barcode code is required' });
     }
 
-    const barcode = await Barcode.findOne({ code });
-    if (!barcode) {
-      return res.status(404).json({ message: 'Barcode not found' });
-    }
+    session = await mongoose.startSession();
+    let barcode;
+    let printedInv;
 
-    if (barcode.status === 'USED') {
-      return res.status(400).json({ message: 'Barcode already used' });
-    }
+    await session.withTransaction(async () => {
+      barcode = await Barcode.findOne({ code }).session(session);
+      if (!barcode) throw new Error('Barcode not found');
+      if (barcode.status === 'USED') throw new Error('Barcode already used');
 
-    // find printed inventory for this SKU
-    const printedInv = await Inventory.findOne({
-      productId: barcode.productId,
-      type: 'PRINTED',
-      designCode: barcode.designCode,
+      printedInv = await Inventory.findOneAndUpdate(
+        {
+          productId: barcode.productId,
+          type: 'PRINTED',
+          designCode: barcode.designCode,
+          quantity: { $gte: 1 },
+        },
+        { $inc: { quantity: -1, activeBarcodeCount: -1 } },
+        { new: true, session },
+      );
+
+      if (!printedInv) {
+        throw new Error('No printed stock available for this barcode SKU');
+      }
+
+      barcode.status = 'USED';
+      barcode.usedAt = new Date();
+      await barcode.save({ session });
     });
-
-    if (!printedInv || printedInv.quantity <= 0) {
-      return res.status(400).json({
-        message: 'No printed stock available for this barcode SKU',
-      });
-    }
-
-    // Deduct 1 from printed stock
-    printedInv.quantity -= 1;
-    await printedInv.save();
-
-    // Mark barcode as USED
-    barcode.status = 'USED';
-    barcode.usedAt = new Date();
-    if (userId) {
-      barcode.usedBy = userId;
-    }
-    await barcode.save();
 
     res.json({
       message: 'Barcode scanned; printed stock decremented',
@@ -118,8 +115,19 @@ const scanBarcode = async (req, res) => {
       },
     });
   } catch (err) {
+    if (
+      err.message === 'Barcode not found' ||
+      err.message === 'Barcode already used' ||
+      err.message === 'No printed stock available for this barcode SKU'
+    ) {
+      return res.status(err.message === 'Barcode not found' ? 404 : 400).json({
+        message: err.message,
+      });
+    }
     console.error('Scan barcode error', err);
     res.status(500).json({ message: 'Server error' });
+  } finally {
+    if (session) await session.endSession();
   }
 };
 

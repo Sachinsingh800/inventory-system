@@ -217,7 +217,7 @@ const inventorySchema = new mongoose.Schema(
 |
 */
 
-inventorySchema.pre("validate", function (next) {
+inventorySchema.pre("validate", function () {
   if (this.type === "RAW") {
     this.designCode = null;
   }
@@ -226,10 +226,8 @@ inventorySchema.pre("validate", function (next) {
     this.type === "PRINTED" &&
     !this.designCode
   ) {
-    return next(
-      new Error(
-        "PRINTED inventory requires designCode",
-      ),
+    throw new Error(
+      "PRINTED inventory requires designCode",
     );
   }
 
@@ -244,7 +242,6 @@ inventorySchema.pre("validate", function (next) {
     this.activeBarcodeCount = 0;
   }
 
-  next();
 });
 
 /*
