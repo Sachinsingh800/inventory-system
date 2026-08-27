@@ -27,6 +27,10 @@ const printingJobSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 1,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "quantity must be a whole number",
+      },
     },
     status: {
       type: String,
@@ -42,6 +46,51 @@ const printingJobSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    /*
+     * Barcode generation belongs to the printing job, not to an aggregate
+     * inventory total. This makes a 100-unit print job generate one exact
+     * 100-label batch even when old labels exist for the same design.
+     */
+    barcodeGenerationStatus: {
+      type: String,
+      enum: [
+        "NOT_READY",
+        "PENDING",
+        "GENERATING",
+        "GENERATED",
+        "LEGACY_UNLINKED",
+      ],
+      default: "NOT_READY",
+      index: true,
+    },
+    barcodeGenerationBatchId: {
+      type: String,
+      default: null,
+      trim: true,
+      index: true,
+    },
+    barcodeExpectedCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "barcodeExpectedCount must be a whole number",
+      },
+    },
+    barcodeGeneratedCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "barcodeGeneratedCount must be a whole number",
+      },
+    },
+    barcodeGeneratedAt: {
+      type: Date,
+      default: null,
+    },
     minThreshold: {
       type: Number,
       default: 0,
@@ -54,5 +103,12 @@ const printingJobSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+printingJobSchema.index({
+  productId: 1,
+  designId: 1,
+  barcodeGenerationStatus: 1,
+  createdAt: -1,
+});
 
 module.exports = mongoose.model("PrintingJob", printingJobSchema);

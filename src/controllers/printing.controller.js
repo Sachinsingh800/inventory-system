@@ -33,6 +33,11 @@ const applyCompletedJobInventory = async (printingJob, session) => {
   );
 
   printingJob.inventoryAdded = true;
+  printingJob.barcodeGenerationStatus = "PENDING";
+  printingJob.barcodeGenerationBatchId = null;
+  printingJob.barcodeExpectedCount = printingJob.quantity;
+  printingJob.barcodeGeneratedCount = 0;
+  printingJob.barcodeGeneratedAt = null;
   await printingJob.save({ session });
 
   return { rawInventory, printedInventory };
@@ -108,6 +113,13 @@ const createPrintingJob = async (req, res) => {
             status,
             notes,
             inventoryAdded: false,
+            barcodeGenerationStatus:
+              status === "COMPLETED"
+                ? "PENDING"
+                : "NOT_READY",
+            barcodeExpectedCount:
+              Number(quantity),
+            barcodeGeneratedCount: 0,
             minThreshold: threshold,
             createdBy: req.user?.id,
           },
@@ -127,6 +139,13 @@ const createPrintingJob = async (req, res) => {
           : "Printing job created successfully",
       printingJob,
       inventory,
+      barcodeGeneration: printingJob.inventoryAdded
+        ? {
+            expectedCount: printingJob.barcodeExpectedCount,
+            status: printingJob.barcodeGenerationStatus,
+            endpoint: `/api/printing-jobs/${printingJob._id}/barcodes`,
+          }
+        : null,
     });
   } catch (err) {
     if (err.message === "Insufficient RAW inventory for this printing job") {
@@ -236,6 +255,13 @@ const updatePrintingJob = async (req, res) => {
         : "Printing job updated successfully",
       printingJob,
       inventory,
+      barcodeGeneration: printingJob.inventoryAdded
+        ? {
+            expectedCount: printingJob.barcodeExpectedCount,
+            status: printingJob.barcodeGenerationStatus,
+            endpoint: `/api/printing-jobs/${printingJob._id}/barcodes`,
+          }
+        : null,
     });
   } catch (err) {
     if (

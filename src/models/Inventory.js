@@ -21,6 +21,10 @@ const mongoose = require("mongoose");
 | unbarcodedQuantity
 |   = PRINTED units that have NOT received a barcode yet
 |
+| pendingBarcodeQuantity
+|   = Exact quantity added by new printing work that still needs a fresh
+|     barcode batch. It is independent of historical barcode records.
+|
 | activeBarcodeCount
 |   = AVAILABLE barcode labels currently assigned
 |
@@ -108,6 +112,10 @@ const inventorySchema = new mongoose.Schema(
       required: true,
       default: 0,
       min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "quantity must be a whole number",
+      },
     },
 
     /*
@@ -137,6 +145,35 @@ const inventorySchema = new mongoose.Schema(
       required: true,
       default: 0,
       min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "unbarcodedQuantity must be a whole number",
+      },
+    },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Pending Barcode Queue Quantity
+    |--------------------------------------------------------------------------
+    |
+    | Every new PRINTED quantity increments this queue. Barcode generation
+    | consumes this exact queue value, so stale AVAILABLE labels from older
+    | batches can never make a newly printed batch generate fewer labels.
+    |
+    | A missing or `null` value marks legacy inventory created before this queue
+    | existed. New PRINTED rows receive a numeric value through the controlled
+    | stock-add paths, which avoids MongoDB attempting to increment a null.
+    |
+    */
+
+    pendingBarcodeQuantity: {
+      type: Number,
+      min: 0,
+      validate: {
+        validator: (value) =>
+          value == null || Number.isSafeInteger(value),
+        message: "pendingBarcodeQuantity must be a whole number",
+      },
     },
 
     /*
@@ -156,6 +193,10 @@ const inventorySchema = new mongoose.Schema(
       required: true,
       default: 0,
       min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "activeBarcodeCount must be a whole number",
+      },
     },
 
     /*
@@ -239,6 +280,7 @@ inventorySchema.pre("validate", function () {
 
   if (this.type === "RAW") {
     this.unbarcodedQuantity = 0;
+    this.pendingBarcodeQuantity = null;
     this.activeBarcodeCount = 0;
   }
 

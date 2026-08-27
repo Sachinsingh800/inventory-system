@@ -3,6 +3,9 @@ const Barcode = require('../models/Barcode');
 const Inventory = require('../models/Inventory');
 const Product = require('../models/Product'); // make sure this path is correct
 const mongoose = require('mongoose');
+const {
+  calculateBarcodeGenerationCount,
+} = require('../services/barcode-generation.service');
 
 // NEW: POST /api/packing/lookup (ADMIN / PACKER)
 // body: { code }
@@ -64,8 +67,7 @@ const lookupBarcode = async (req, res) => {
 const scanBarcode = async (req, res) => {
   let session;
   try {
-    const { code } = req.body;
-    const userId = req.user?.id; // optional
+    const code = String(req.body.code || '').trim();
 
     if (!code) {
       return res.status(400).json({ message: 'Barcode code is required' });
@@ -76,9 +78,18 @@ const scanBarcode = async (req, res) => {
     let printedInv;
 
     await session.withTransaction(async () => {
-      barcode = await Barcode.findOne({ code }).session(session);
-      if (!barcode) throw new Error('Barcode not found');
-      if (barcode.status === 'USED') throw new Error('Barcode already used');
+      // Claim the label atomically. If a second scan arrives at the same
+      // moment, only one transaction can turn it from AVAILABLE to USED.
+      barcode = await Barcode.findOneAndUpdate(
+        { code, status: 'AVAILABLE' },
+        { $set: { status: 'USED', usedAt: new Date() } },
+        { new: true, session },
+      );
+
+      if (!barcode) {
+        const existingBarcode = await Barcode.exists({ code }).session(session);
+        throw new Error(existingBarcode ? 'Barcode already used' : 'Barcode not found');
+      }
 
       printedInv = await Inventory.findOneAndUpdate(
         {
@@ -87,7 +98,7 @@ const scanBarcode = async (req, res) => {
           designCode: barcode.designCode,
           quantity: { $gte: 1 },
         },
-        { $inc: { quantity: -1, activeBarcodeCount: -1 } },
+        { $inc: { quantity: -1 } },
         { new: true, session },
       );
 
@@ -95,9 +106,33 @@ const scanBarcode = async (req, res) => {
         throw new Error('No printed stock available for this barcode SKU');
       }
 
-      barcode.status = 'USED';
-      barcode.usedAt = new Date();
-      await barcode.save({ session });
+      // The Barcode collection is authoritative. Recalculate the cached
+      // counters after every scan, which also repairs old inconsistent rows.
+      const availableBarcodeCount = await Barcode.countDocuments({
+        productId: barcode.productId,
+        designCode: barcode.designCode,
+        status: 'AVAILABLE',
+      }).session(session);
+
+      const unbarcodedQuantity = calculateBarcodeGenerationCount(
+        printedInv.quantity,
+        availableBarcodeCount,
+      );
+
+      printedInv = await Inventory.findOneAndUpdate(
+        { _id: printedInv._id, quantity: printedInv.quantity },
+        {
+          $set: {
+            activeBarcodeCount: availableBarcodeCount,
+            unbarcodedQuantity,
+          },
+        },
+        { new: true, runValidators: true, session },
+      );
+
+      if (!printedInv) {
+        throw new Error('PRINTED inventory changed; please scan the barcode again');
+      }
     });
 
     res.json({
@@ -118,7 +153,8 @@ const scanBarcode = async (req, res) => {
     if (
       err.message === 'Barcode not found' ||
       err.message === 'Barcode already used' ||
-      err.message === 'No printed stock available for this barcode SKU'
+      err.message === 'No printed stock available for this barcode SKU' ||
+      err.message === 'PRINTED inventory changed; please scan the barcode again'
     ) {
       return res.status(err.message === 'Barcode not found' ? 404 : 400).json({
         message: err.message,

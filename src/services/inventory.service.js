@@ -53,19 +53,35 @@ const deductRawStock = (productId, quantity, session) =>
 /**
  * Add stock to one PRINTED inventory row for this product/model + design.
  */
-const addPrintedStock = (productId, designCode, quantity, session) =>
-  Inventory.findOneAndUpdate(
-    printedFilter(productId, designCode),
+const addPrintedStock = async (productId, designCode, quantity, session) => {
+  const filter = printedFilter(productId, designCode);
+
+  // Existing installations can contain an explicit `null` from before the
+  // exact queue was introduced. MongoDB cannot $inc a null value, so upgrade
+  // it atomically inside the caller's transaction before adding new stock.
+  await Inventory.updateOne(
+    { ...filter, pendingBarcodeQuantity: null },
+    { $set: { pendingBarcodeQuantity: 0 } },
+    session ? { session } : {},
+  );
+
+  return Inventory.findOneAndUpdate(
+    filter,
     {
-      $inc: { quantity, unbarcodedQuantity: quantity },
+      $inc: {
+        quantity,
+        unbarcodedQuantity: quantity,
+        pendingBarcodeQuantity: quantity,
+      },
       $set: { isActive: true },
       $setOnInsert: {
         ...printedFilter(productId, designCode),
         minThreshold: 0,
       },
     },
-    updateOptions(session)
+    updateOptions(session),
   );
+};
 
 /**
  * Deduct PRINTED stock only. Barcode scans must call this, never deductRawStock.

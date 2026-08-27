@@ -5,6 +5,10 @@ const mongoose = require("mongoose");
 const Inventory = require("../models/Inventory");
 const ProductDesign = require("../models/ProductDesign");
 const Barcode = require("../models/Barcode");
+const { addPrintedStock } = require("../services/inventory.service");
+
+const isPositiveWholeNumber = (value) =>
+  Number.isSafeInteger(Number(value)) && Number(value) > 0;
 
 // ============================================================
 // POST /api/inventory/raw
@@ -164,15 +168,14 @@ const addDesignToRawInventory = async (
     // ----------------------------------------------------------
     // Validate quantity
     // ----------------------------------------------------------
-    if (
-      !quantity ||
-      Number(quantity) < 1
-    ) {
+    if (!isPositiveWholeNumber(quantity)) {
       return res.status(400).json({
         message:
-          "quantity must be greater than 0",
+          "quantity must be a positive whole number",
       });
     }
+
+    const rawQuantity = Number(quantity);
 
     // ----------------------------------------------------------
     // Find design
@@ -203,7 +206,7 @@ const addDesignToRawInventory = async (
         },
         {
           $inc: {
-            quantity: Number(quantity),
+            quantity: rawQuantity,
           },
 
           $set: {
@@ -258,6 +261,7 @@ const transferRawToPrintedInventory = async (
   req,
   res
 ) => {
+  let session;
   try {
     const {
       productId,
@@ -268,23 +272,23 @@ const transferRawToPrintedInventory = async (
     // ----------------------------------------------------------
     // Validate required fields
     // ----------------------------------------------------------
-    if (!productId || !designId) {
+    if (
+      !mongoose.Types.ObjectId.isValid(productId) ||
+      !mongoose.Types.ObjectId.isValid(designId)
+    ) {
       return res.status(400).json({
         message:
-          "productId and designId are required",
+          "A valid productId and designId are required",
       });
     }
 
     // ----------------------------------------------------------
     // Validate quantity
     // ----------------------------------------------------------
-    if (
-      !quantity ||
-      Number(quantity) < 1
-    ) {
+    if (!isPositiveWholeNumber(quantity)) {
       return res.status(400).json({
         message:
-          "quantity must be greater than 0",
+          "quantity must be a positive whole number",
       });
     }
 
@@ -306,74 +310,52 @@ const transferRawToPrintedInventory = async (
     }
 
     const moveQuantity = Number(quantity);
+    let rawInventory;
+    let printedInventory;
 
-    // ----------------------------------------------------------
-    // Deduct RAW stock
-    // ----------------------------------------------------------
-    const rawInventory =
-      await Inventory.findOneAndUpdate(
+    session = await mongoose.startSession();
+
+    await session.withTransaction(async () => {
+      // Preserve the older design-specific RAW workflow while also supporting
+      // the newer product-level RAW row used by printing jobs. Prefer stock
+      // explicitly assigned to this design, then fall back to product-level.
+      rawInventory = await Inventory.findOneAndUpdate(
         {
           productId,
           type: "RAW",
           designCode: design.designCode,
-
-          quantity: {
-            $gte: moveQuantity,
-          },
+          quantity: { $gte: moveQuantity },
         },
-        {
-          $inc: {
-            quantity: -moveQuantity,
-          },
-        },
-        {
-          new: true,
-        }
+        { $inc: { quantity: -moveQuantity } },
+        { new: true, session },
       );
 
-    if (!rawInventory) {
-      return res.status(400).json({
-        message:
-          "Insufficient RAW inventory for this model/design",
-      });
-    }
-
-    // ----------------------------------------------------------
-    // Add PRINTED stock
-    // ----------------------------------------------------------
-    const printedInventory =
-      await Inventory.findOneAndUpdate(
-        {
-          productId,
-          type: "PRINTED",
-          designCode:
-            design.designCode,
-        },
-        {
-          $inc: {
-            quantity: moveQuantity,
-            unbarcodedQuantity: moveQuantity,
-          },
-
-          $set: {
-            isActive: true,
-          },
-
-          $setOnInsert: {
+      if (!rawInventory) {
+        rawInventory = await Inventory.findOneAndUpdate(
+          {
             productId,
-            type: "PRINTED",
-            designCode:
-              design.designCode,
-            minThreshold: 0,
-            barcodes: [],
+            type: "RAW",
+            designCode: null,
+            quantity: { $gte: moveQuantity },
           },
-        },
-        {
-          new: true,
-          upsert: true,
-          runValidators: true,
-        }
+          { $inc: { quantity: -moveQuantity } },
+          { new: true, session },
+        );
+      }
+
+      if (!rawInventory) {
+        throw new Error("Insufficient RAW inventory for this product");
+      }
+
+      // Each newly printed item starts out needing one barcode label. The
+      // shared helper also normalizes legacy null queue values safely.
+      printedInventory = await addPrintedStock(
+        productId,
+        design.designCode,
+        moveQuantity,
+        session,
       );
+    });
 
     return res.json({
       message:
@@ -384,6 +366,10 @@ const transferRawToPrintedInventory = async (
       printedInventory,
     });
   } catch (err) {
+    if (err.message === "Insufficient RAW inventory for this product") {
+      return res.status(400).json({ message: err.message });
+    }
+
     console.error(
       "Transfer RAW to PRINTED inventory error:",
       err
@@ -392,6 +378,10 @@ const transferRawToPrintedInventory = async (
     return res.status(500).json({
       message: "Server error",
     });
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
   }
 };
 

@@ -23,6 +23,21 @@ const barcodeSchema = new mongoose.Schema(
       index: true,
     },
 
+    /* The completed printing job that produced this exact label batch. */
+    printingJobId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PrintingJob',
+      default: null,
+      index: true,
+    },
+
+    /* Position within a printing-job batch: 1 through job.quantity. */
+    labelSequence: {
+      type: Number,
+      default: null,
+      min: 1,
+    },
+
     /*
      * Every barcode generation request gets its own batch.
      *
@@ -90,5 +105,19 @@ barcodeSchema.index({
   designCode: 1,
   status: 1,
 });
+
+/* Exactly one label may occupy each position in a linked printing job. */
+barcodeSchema.index(
+  {
+    printingJobId: 1,
+    labelSequence: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      printingJobId: { $type: 'objectId' },
+    },
+  },
+);
 
 module.exports = mongoose.model('Barcode', barcodeSchema);
